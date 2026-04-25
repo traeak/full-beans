@@ -287,5 +287,8 @@ int main(int argc, char **argv) {
     }
   }
 
+  free(ctx);
+  r_deinit();
+
   return 0;
 }

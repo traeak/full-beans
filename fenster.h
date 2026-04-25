@@ -33,6 +33,7 @@
 #define _DEFAULT_SOURCE 1
 #include <X11/XKBlib.h>
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>
 #include <X11/keysym.h>
 #include <time.h>
 #endif
@@ -299,7 +300,12 @@ FENSTER_API int fenster_open(struct fenster *f) {
                         (char *)f->buf, f->width, f->height, 32, 0);
   return 0;
 }
-FENSTER_API void fenster_close(struct fenster *f) { XCloseDisplay(f->dpy); }
+FENSTER_API void fenster_close(struct fenster *f) {
+  XFreeGC(f->dpy, f->gc);
+  f->img->data = NULL;
+  XDestroyImage(f->img);
+  XCloseDisplay(f->dpy);
+}
 FENSTER_API int fenster_loop(struct fenster *f) {
   XEvent ev;
   XPutImage(f->dpy, f->w, f->gc, f->img, 0, 0, 0, 0, f->width, f->height);
@@ -327,6 +333,8 @@ FENSTER_API int fenster_loop(struct fenster *f) {
       f->mod = (!!(m & ControlMask)) | (!!(m & ShiftMask) << 1) |
                (!!(m & Mod1Mask) << 2) | (!!(m & Mod4Mask) << 3);
     } break;
+    default:
+      break;
     }
   }
   return 0;
@@ -374,10 +382,10 @@ public:
   }
   void clear() { memset(this->f.buf, 0, this->f.width * this->f.height * 4); }
   bool loop(const int fps) {
-    int64_t t = fenster_time();
-    int64_t paint_time = t - this->now;
-    int64_t frame_budget = 1000 / fps;
-    int64_t sleep_time = frame_budget - paint_time;
+    int64_t const t = fenster_time();
+    int64_t const paint_time = t - this->now;
+    int64_t const frame_budget = 1000 / fps;
+    int64_t const sleep_time = frame_budget - paint_time;
     if (sleep_time > 0) {
       fenster_sleep(sleep_time);
     }

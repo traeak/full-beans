@@ -213,9 +213,26 @@ struct mu_Context {
 };
 
 
-mu_Vec2 mu_vec2(int x, int y);
-mu_Rect mu_rect(int x, int y, int w, int h);
-mu_Color mu_color(int r, int g, int b, int a);
+//mu_Vec2 mu_vec2(int x, int y);
+static inline mu_Vec2 mu_vec2(int x, int y) {
+  mu_Vec2 res;
+  res.x = x; res.y = y;
+  return res;
+}
+
+//mu_Rect mu_rect(int x, int y, int w, int h);
+static inline mu_Rect mu_rect(int x, int y, int w, int h) {
+  mu_Rect res;
+  res.x = x; res.y = y; res.w = w; res.h = h;
+  return res;
+}
+
+//mu_Color mu_color(int r, int g, int b, int a);
+static inline mu_Color mu_color(int r, int g, int b, int a) {
+  mu_Color res;
+  res.r = r; res.g = g; res.b = b; res.a = a;
+  return res;
+}
 
 void mu_init(mu_Context *ctx);
 void mu_begin(mu_Context *ctx);

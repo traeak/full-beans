@@ -1,5 +1,8 @@
-CFLAGS ?= -DNDEBUG -O3 -Wall -Wextra -pedantic -std=c99
+CFLAGS ?= -DNDEBUG -O3 -Wall -Wextra -pedantic -std=c99 -ftree-vectorize -msse2 -mfpmath=sse -fopt-info-vec-missed
+#CFLAGS ?= -DNDEBUG -pg -Wall -Wextra -pedantic -std=c99
+#CFLAGS ?= -DNDEBUG -c -Wall -Wextra -pedantic -std=c99
 LDLIBS = -lm
+#LDLIBS = -lm -pg
 SOURCES := main.c renderer.c microui.c
 OBJECTS := $(SOURCES:%.c=%.o)
 DEPS := $(SOURCES:%.c=%.d)

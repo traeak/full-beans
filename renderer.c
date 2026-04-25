@@ -15,6 +15,7 @@ static mu_Color color_buf[BUFFER_SIZE];
 static int buf_idx;
 
 static struct fenster window = {.title="A window", .width=800, .height=600};
+//static struct fenster window = {.title="A window", .width=1920, .height=1200};
 
 static mu_Rect clip_rect;
 
@@ -26,6 +27,11 @@ void r_init(void) {
 
   /* init texture */
   clip_rect = mu_rect(0, 0, window.width, window.height);
+}
+
+void r_deinit(void) {
+  fenster_close(&window);
+  free(window.buf);
 }
 
 static inline bool within(int c, int lo, int hi) {
@@ -53,7 +59,7 @@ static inline uint32_t r_color(mu_Color clr) {
   return ((uint32_t)clr.a << 24) | ((uint32_t)clr.r << 16) | ((uint32_t)clr.g << 8) | clr.b;
 }
 
-mu_Color mu_color_argb(uint32_t clr) {
+static inline mu_Color mu_color_argb(uint32_t clr) {
   return mu_color((clr >> 16) & 0xff, (clr >> 8) & 0xff, clr & 0xff, (clr >> 24) & 0xff);
 }
 
@@ -61,9 +67,8 @@ static inline int greyscale(byte c) {
   return r_color(mu_color(c, c, c, 255));
 }
 
-
-static inline mu_Color blend_pixel(mu_Color dst, mu_Color src) {
-  int ia = 0xff - src.a;
+static inline mu_Color blend_pixel(mu_Color dst, mu_Color const src) {
+  int const ia = 0xff - src.a;
   dst.r = ((src.r * src.a) + (dst.r * ia)) >> 8;
   dst.g = ((src.g * src.a) + (dst.g * ia)) >> 8;
   dst.b = ((src.b * src.a) + (dst.b * ia)) >> 8;
