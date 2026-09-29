@@ -83,14 +83,20 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Link platform-specific audio libraries on the module where fenster_audio lives.
+    // Link platform-specific libraries on the module where fenster/fenster_audio live.
     if (target.result.os.tag == .macos) {
         mod.linkFramework("AudioToolbox", .{});
         mod.linkFramework("dispatch", .{});
+        mod.linkFramework("Cocoa", .{});
+        mod.linkFramework("CoreGraphics", .{});
+        mod.linkFramework("objc", .{});
     } else if (target.result.os.tag == .windows) {
         mod.linkSystemLibrary("winmm", .{});
+        mod.linkSystemLibrary("user32", .{});
+        mod.linkSystemLibrary("gdi32", .{});
     } else if (target.result.os.tag == .linux) {
         mod.linkSystemLibrary("asound", .{});
+        mod.linkSystemLibrary("X11", .{});
     }
 
     // This declares intent for the executable to be installed into the
