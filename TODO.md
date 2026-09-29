@@ -161,20 +161,20 @@ sliders, tree, popups, scrolling, live style editing), using the existing
       results.
 
 ### 7. App wiring (`src/main.zig`)
-- [ ] 7.1 Replace the `zig init` boilerplate entirely.
-- [ ] 7.2 Port `writeLog` + `logbuf` (64000 B) state.
-- [ ] 7.3 Port `testWindow` — Demo Window: headers, buttons, popup, tree,
+- [x] 7.1 Replace the `zig init` boilerplate entirely.
+- [x] 7.2 Port `writeLog` + `logbuf` (64000 B) state.
+- [x] 7.3 Port `testWindow` — Demo Window: headers, buttons, popup, tree,
       columns, lorem text, min-size clamp (`w >= 240`, `h >= 300`).
-- [ ] 7.4 Port `logWindow` — output panel with scroll-to-bottom on update,
+- [x] 7.4 Port `logWindow` — output panel with scroll-to-bottom on update,
       textbox + Submit, `MU_RES_SUBMIT` handling, `setFocus(ctx.last_id)`.
-- [ ] 7.5 Port `uint8Slider` helper (pushId by pointer, temp float, `%.0f`).
-- [ ] 7.6 Port `styleWindow` — 15-color × RGBA slider grid + live swatch.
-- [ ] 7.7 Port `processFrame` (begin → style/log/test windows → end).
-- [ ] 7.8 Port `textWidth` / `textHeight` callbacks into the renderer.
-- [ ] 7.9 Port the main loop: input mapping from `Fenster` fields →
+- [x] 7.5 Port `uint8Slider` helper (pushId by pointer, temp float, `%.0f`).
+- [x] 7.6 Port `styleWindow` — 15-color × RGBA slider grid + live swatch.
+- [x] 7.7 Port `processFrame` (begin → style/log/test windows → end).
+- [x] 7.8 Port `textWidth` / `textHeight` callbacks into the renderer.
+- [x] 7.9 Port the main loop: input mapping from `Fenster` fields →
       `mu_input_*`, ESC quits, command dispatch to renderer, 60 fps
       frame-budget sleep.
-- [ ] 7.10 Wire `main` to `std.process.Init` (arena + io) and construct
+- [x] 7.10 Wire `main` to `std.process.Init` (arena + io) and construct
       `Renderer` + `Context`.
 
 ### 8. Parity + performance verification
@@ -328,6 +328,30 @@ Surfaced during Phase 0, beyond the original plan. All completed.
       rewriting anyway — it would have flashed a real window on every
       `zig build test`. Replaced with construction + `pixel()` offset checks;
       live window behaviour stays in `zig build smoke`.
+
+- [x] **D37 C header macros are part of the API.** `mu_button`, `mu_slider` and
+      `mu_number` are `#define`s that supply defaults the `_ex` functions don't:
+      `mu_button` adds `MU_OPT_ALIGNCENTER`; `mu_slider`/`mu_number` use
+      `MU_SLIDER_FMT` (`%.2f`) **and** `MU_OPT_ALIGNCENTER`. Porting them as
+      plain `opt = 0` / `REAL_FMT` calls silently left-aligned button labels and
+      rendered `90` where C rendered `90.00`. Audit every function-like macro,
+      not just the ones you happen to notice.
+- [x] **D38 `ButtonPressMask` was declared `1 << 4` — that is
+      `EnterWindowMask`.** Real X11 values: `ButtonPress = 1<<2`,
+      `ButtonRelease = 1<<3`. The window therefore subscribed to pointer
+      enter/leave instead of buttons, so **no click ever reached the app**.
+      Caught by diffing the raw event stream against a C binary instrumented
+      the same way: C saw types 4/5, Zig saw 7 (EnterNotify) and nothing else.
+      - Why the Phase 0 smoke test missed it: the smoke injector used the *same
+        wrong constant* on both sides, so sender and receiver agreed on 1<<4 and
+        the event got through. `mouse_btn=1` was a false positive produced by
+        two matching bugs. Testing against an independent implementation
+        (`/tmp/inject.c`, compiled against real X11 headers) is what broke the
+        symmetry.
+- [x] **D39** Added `tools/xinject.c` — XSendEvent button injector. Needed
+      because this X server drops XTEST button events, so `xdotool click` is a
+      no-op while `xdotool mousemove` works. Documented there so future
+      interaction tests use the right tool.
 
 ### Standing lesson for Phases 2–6
 `zig build` passing proves nothing about code the compiler never analyzed. Every

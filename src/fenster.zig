@@ -85,7 +85,7 @@ pub fn fenster_sleep(io: std.Io, ms: i64) void {
 /// Current time in milliseconds since the Unix epoch.
 pub fn fenster_time(io: std.Io) i64 {
     const ts = std.Io.Clock.now(.real, io);
-    return @divTrunc(ts.nanoseconds, 1_000_000);
+    return @intCast(@divTrunc(ts.nanoseconds, 1_000_000));
 }
 
 // ---------------------------------------------------------------------------
@@ -497,8 +497,12 @@ const Mod4Mask: c_int = 64;
 
 const KeyPressMask: c_ulong = 1 << 0;
 const KeyReleaseMask: c_ulong = 1 << 1;
-const ButtonPressMask: c_ulong = 1 << 4;
-const ButtonReleaseMask: c_ulong = 1 << 5;
+// X11 event masks (X.h). These were previously 1<<4 / 1<<5, which are
+// EnterWindowMask / LeaveWindowMask -- so the window subscribed to pointer
+// enter/leave instead of button events, and ButtonPress never reached the
+// handler. Verified against the server via XGetWindowAttributes.
+const ButtonPressMask: c_ulong = 1 << 2;
+const ButtonReleaseMask: c_ulong = 1 << 3;
 const PointerMotionMask: c_ulong = 1 << 6;
 const ExposureMask: c_ulong = 1 << 15;
 

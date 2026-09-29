@@ -562,6 +562,15 @@ pub fn drawText(ctx: *Context, font: Font, str: []const u8, pos: Vec2, color: Co
     if (clipped != .none) setClip(ctx, unclipped_rect) catch return;
 }
 
+/// The string payload of a text command. The arena stores it NUL-terminated, so
+/// the length is recovered by scanning (bounded by the arena size).
+pub fn textSlice(cmd: *Command) []const u8 {
+    const p: [*]const u8 = @ptrCast(&cmd.*.text.str);
+    var n: usize = 0;
+    while (n < COMMANDLIST_SIZE and p[n] != 0) : (n += 1) {}
+    return p[0..n];
+}
+
 pub fn drawIcon(ctx: *Context, id: c_int, rect: Rect, color: Color) void {
     const clipped = checkClip(ctx, rect);
     if (clipped == .all) return;
@@ -770,8 +779,9 @@ pub fn getContainerByName(ctx: *Context, name: []const u8) ?*Container {
 }
 
 fn getContainer(ctx: *Context, id: Id, opt: c_int) ?*Container {
-    const idx = poolGet(ctx, &ctx.container_pool, id);
-    if (0 <= idx) {
+    const found = poolGet(ctx, &ctx.container_pool, id);
+    if (0 <= found) {
+        const idx: usize = @intCast(found);
         if (ctx.containers[idx].open != 0 or (opt & OPT_CLOSED) == 0) {
             poolUpdate(ctx, &ctx.container_pool, idx);
         }
@@ -1167,6 +1177,17 @@ pub fn updateControl(ctx: *Context, id: Id, rect: Rect, opt: c_int) void {
 // Controls -- text, label, button, checkbox
 // ---------------------------------------------------------------------------
 
+/// C derives pointer-keyed widget ids with `mu_get_id(ctx, &value, sizeof(value))`,
+/// which hashes the address of the *parameter slot* on the stack. That happens to
+/// be stable in C only because the call sequence repeats identically every
+/// frame; a different inlining decision would silently reshuffle widget ids and
+/// lose their retained state. Hashing the pointee address instead keeps the same
+/// distinctness with no such dependency.
+fn ptrId(ctx: *Context, ptr: anytype) Id {
+    var addr: usize = @intFromPtr(ptr);
+    return getId(ctx, std.mem.asBytes(&addr));
+}
+
 /// Byte at `i`, or 0 past the end. Mirrors C's NUL-terminated `*p` reads so the
 /// word-wrap loop below can be a faithful transliteration.
 fn at(s: []const u8, i: usize) u8 {
@@ -1221,7 +1242,7 @@ pub fn label(ctx: *Context, str: []const u8) void {
 pub fn buttonEx(ctx: *Context, label_: ?[]const u8, icon: c_int, opt: c_int) c_int {
     var res: c_int = 0;
     const id = if (label_) |l| getId(ctx, l) else blk: {
-        // C hashes the icon int's storage: mu_get_id(ctx, &icon, sizeof(icon)).
+        // Icon-only button: C keys on the icon int's storage.
         var tmp = icon;
         break :blk getId(ctx, std.mem.asBytes(&tmp));
     };
@@ -1236,16 +1257,16 @@ pub fn buttonEx(ctx: *Context, label_: ?[]const u8, icon: c_int, opt: c_int) c_i
     return res;
 }
 
+/// C's `mu_button` is a header macro that adds MU_OPT_ALIGNCENTER. The default
+/// is part of the API -- see D37.
 pub fn button(ctx: *Context, label_: []const u8) c_int {
-    return buttonEx(ctx, label_, 0, 0);
+    return buttonEx(ctx, label_, 0, OPT_ALIGNCENTER);
 }
 
 /// Returns a Result bitmask (RES_CHANGE when toggled).
 pub fn checkbox(ctx: *Context, label_: []const u8, state: *bool) c_int {
     var res: c_int = 0;
-    // C hashes the pointer value itself: mu_get_id(ctx, &state, sizeof(state)).
-    var ptr_tmp = state;
-    const id = getId(ctx, std.mem.asBytes(&ptr_tmp));
+    const id = ptrId(ctx, state);
     const r = layoutNext(ctx);
     const box = Rect.rect(r.x, r.y, r.h, r.h);
     updateControl(ctx, id, r, 0);
@@ -1571,9 +1592,7 @@ pub fn textboxRaw(ctx: *Context, buf: []u8, id: Id, r: Rect, opt: c_int) c_int {
 }
 
 pub fn textboxEx(ctx: *Context, buf: []u8, opt: c_int) c_int {
-    // C: mu_get_id(ctx, &buf, sizeof(buf)) -- hashes the pointer value.
-    var ptr_tmp: [*]u8 = @ptrCast(buf);
-    const id = getId(ctx, std.mem.asBytes(&ptr_tmp));
+    const id = ptrId(ctx, buf.ptr);
     const r = layoutNext(ctx);
     return textboxRaw(ctx, buf, id, r, opt);
 }
@@ -1616,8 +1635,7 @@ pub fn sliderEx(
     var res: c_int = 0;
     const last = value.*;
     var v = last;
-    var ptr_tmp: [*]Real = @ptrCast(value);
-    const id = getId(ctx, std.mem.asBytes(&ptr_tmp));
+    const id = ptrId(ctx, value);
     const base = layoutNext(ctx);
 
     if (numberTextbox(ctx, &v, base, id)) return res;
@@ -1653,13 +1671,12 @@ pub fn sliderEx(
 }
 
 pub fn slider(ctx: *Context, value: *Real, low: Real, high: Real) c_int {
-    return sliderEx(ctx, value, low, high, 0, REAL_FMT, 0);
+    return sliderEx(ctx, value, low, high, 0, SLIDER_FMT, OPT_ALIGNCENTER);
 }
 
 pub fn numberEx(ctx: *Context, value: *Real, step: Real, fmt: []const u8, opt: c_int) c_int {
     var res: c_int = 0;
-    var ptr_tmp: [*]Real = @ptrCast(value);
-    const id = getId(ctx, std.mem.asBytes(&ptr_tmp));
+    const id = ptrId(ctx, value);
     const base = layoutNext(ctx);
     const last = value.*;
 
@@ -1680,7 +1697,7 @@ pub fn numberEx(ctx: *Context, value: *Real, step: Real, fmt: []const u8, opt: c
 }
 
 pub fn number(ctx: *Context, value: *Real, step: Real) c_int {
-    return numberEx(ctx, value, step, REAL_FMT, 0);
+    return numberEx(ctx, value, step, SLIDER_FMT, OPT_ALIGNCENTER);
 }
 
 // ---------------------------------------------------------------------------

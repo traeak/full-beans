@@ -80,6 +80,10 @@ pub const Renderer = struct {
     mouse_x: c_int = 0,
     mouse_y: c_int = 0,
 
+    /// Set from the RDUMP env var to mirror the C renderer's trace, so the two
+    /// draw-call streams can be diffed directly.
+    dump: bool = false,
+
     pub fn init(f: *fenster.Fenster) Renderer {
         var r = Renderer{ .f = f };
         r.clip_rect = mu.Rect.rect(0, 0, f.width, f.height);
@@ -109,7 +113,13 @@ pub const Renderer = struct {
                     const row = @as(usize, @intCast(y)) * width;
                     var x = xstart;
                     while (x < xend) : (x += 1) {
-                        const tc = atlas.sample(@intCast(x - src.x), @intCast(y - src.y));
+                        // C's texture_color() takes the renderer-relative offset
+                        // and adds the atlas rect's origin itself; `atlas.sample`
+                        // expects absolute atlas coordinates, so the origin has
+                        // to be applied here.
+                        const tx = tex.x + (x - src.x);
+                        const ty = tex.y + (y - src.y);
+                        const tc = atlas.sample(@intCast(tx), @intCast(ty));
                         const px = row + @as(usize, @intCast(x));
                         buf[px] |= grey_lut[tc];
                     }
@@ -152,10 +162,12 @@ pub const Renderer = struct {
     }
 
     pub fn drawRect(self: *Renderer, rect: mu.Rect, color: mu.Color) void {
+        if (self.dump) std.debug.print("RECT {d} {d} {d} {d}\n", .{ rect.x, rect.y, rect.w, rect.h });
         self.pushQuad(rect, atlas.rectAt(atlas.ATLAS_WHITE), color);
     }
 
     pub fn drawText(self: *Renderer, text: []const u8, pos: mu.Vec2, color: mu.Color) void {
+        if (self.dump) std.debug.print("TEXT {d} {d} [{s}]\n", .{ pos.x, pos.y, text });
         var dst = mu.Rect.rect(pos.x, pos.y, 0, 0);
         for (text) |byte| {
             // Skip UTF-8 continuation bytes so a multi-byte character does not
@@ -171,6 +183,7 @@ pub const Renderer = struct {
     }
 
     pub fn drawIcon(self: *Renderer, id: c_int, rect: mu.Rect, color: mu.Color) void {
+        if (self.dump) std.debug.print("ICON {d} {d} {d} {d} {d}\n", .{ id, rect.x, rect.y, rect.w, rect.h });
         const src = atlas.rectAt(@intCast(id));
         const x = rect.x + @divTrunc(rect.w - src.w, 2);
         const y = rect.y + @divTrunc(rect.h - src.h, 2);
@@ -192,6 +205,7 @@ pub const Renderer = struct {
     }
 
     pub fn setClipRect(self: *Renderer, rect: mu.Rect) void {
+        if (self.dump) std.debug.print("CLIP {d} {d} {d} {d}\n", .{ rect.x, rect.y, rect.w, rect.h });
         self.flush();
         const ystart = @max(0, rect.y);
         const yend = @min(self.f.height, rect.y + rect.h);
