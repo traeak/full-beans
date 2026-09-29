@@ -139,24 +139,24 @@ sliders, tree, popups, scrolling, live style editing), using the existing
 - [x] 5.9 Re-export `microui` from `src/root.zig`.
 
 ### 6. Renderer (`src/renderer.zig`, decision 3b)
-- [ ] 6.1 Define `Renderer` struct: owns `*Fenster`, `tex_buf`/`src_buf`/
+- [x] 6.1 Define `Renderer` struct: owns `*Fenster`, `tex_buf`/`src_buf`/
       `color_buf` staging arrays (16384 entries each), `buf_idx`, `clip_rect`.
       No module-level mutable state.
-- [ ] 6.2 Port `within` / `withinRect` / `sameSize` / `textureColor` helpers.
-- [ ] 6.3 Port `rColor` (Color→u32 ARGB) and `muColorArgb` (u32→Color).
-- [ ] 6.4 Add **greyscale LUT**: `const grey_lut: [256]u32` precomputed from
+- [x] 6.2 Port `within` / `withinRect` / `sameSize` / `textureColor` helpers.
+- [x] 6.3 Port `rColor` (Color→u32 ARGB) and `muColorArgb` (u32→Color).
+- [x] 6.4 Add **greyscale LUT**: `const grey_lut: [256]u32` precomputed from
       `greyscale(c)`, replacing 3 shifts + 3 ors per pixel with one load.
-- [ ] 6.5 Port `blendPixel`, plus **opaque fast path**: when `src.a == 255`,
+- [x] 6.5 Port `blendPixel`, plus **opaque fast path**: when `src.a == 255`,
       write the constant color across the row instead of blending per pixel.
-- [ ] 6.6 Port `flush` — clip-intersect once per quad (hoist `ystart/yend/
+- [x] 6.6 Port `flush` — clip-intersect once per quad (hoist `ystart/yend/
       xstart/xend` out of the inner loops, as C does), then textured or blend
       path.
-- [ ] 6.7 Port `pushQuad` with the full-buffer flush-on-overflow.
-- [ ] 6.8 Port `drawRect` / `drawText` / `drawIcon` / `getTextWidth` /
+- [x] 6.7 Port `pushQuad` with the full-buffer flush-on-overflow.
+- [x] 6.8 Port `drawRect` / `drawText` / `drawIcon` / `getTextWidth` /
       `getTextHeight` / `setClipRect` / `clear` / `present`.
-- [ ] 6.9 Keep the C quirk: `r_draw_text` skips UTF-8 continuation bytes
+- [x] 6.9 Keep the C quirk: `r_draw_text` skips UTF-8 continuation bytes
       (`(*p & 0xc0) == 0x80`) and clamps to 127.
-- [ ] 6.10 Unit test: render a white-rect quad and a text quad into a small
+- [x] 6.10 Unit test: render a white-rect quad and a text quad into a small
       offscreen buffer, assert exact pixel values against hand-computed C
       results.
 
@@ -306,6 +306,28 @@ Surfaced during Phase 0, beyond the original plan. All completed.
 - [x] **D30** `mu_get_id(ctx, "!scrollbar" #y, 11)` stringifies the macro arg:
       the ids are `"!scrollbary"` / `"!scrollbarx"` (11 bytes, no NUL counted).
       Reproduced with `"!scrollbar" ++ p`.
+
+- [x] **D31** C's blend is **lossy at full opacity**: `(255*255)>>8 == 254`,
+      not 255. The opaque fast path must reproduce that (`opaqueColor`), or the
+      port renders brighter than the C demo. I initially wrote the test expecting
+      253 and had to check C to confirm 254 — the code was right, my mental
+      arithmetic was not.
+- [x] **D32** Zig requires an **unsigned left operand** for `>>`. C's
+      `(src*src.a + dst*ia) >> 8` on `int`s had to move to u32 arithmetic.
+- [x] **D33** `[*]T` has no `.*` deref syntax in Zig — "index syntax required".
+      The three inner rasterizer loops index `buf[row + x]` instead of holding a
+      derived pointer.
+- [x] **D34** `ptr[0..n]` on a `[*]u32` is **not** a slice, so
+      `allocator.free(f.buf[0..8])` fails at comptime. Test fixture now owns the
+      `[]u32` it allocated (`FakeWin`).
+- [x] **D35** `Fenster` cannot be written as a complete struct literal — the
+      per-OS variant has platform-only trailing fields (`dpy/w/gc/img` on X11).
+      Use `std.mem.zeroes` + field assignment.
+- [x] **D36** Zig 0.16 rejects `_ = err` on a caught error payload
+      ("error set is discarded"). The old fenster "open and close" test needed
+      rewriting anyway — it would have flashed a real window on every
+      `zig build test`. Replaced with construction + `pixel()` offset checks;
+      live window behaviour stays in `zig build smoke`.
 
 ### Standing lesson for Phases 2–6
 `zig build` passing proves nothing about code the compiler never analyzed. Every

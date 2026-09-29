@@ -934,29 +934,27 @@ pub fn loop(self: *Fenster) bool {
 // Verify that struct sizes are sane.
 test "fenster: struct sizes" {
     try std.testing.expect(@sizeOf(Fenster) > 0);
-    try std.testing.expect(@sizeOf(Fenster.keys) == 256 * @sizeOf(c_int));
+    try std.testing.expectEqual(256 * @sizeOf(c_int), @sizeOf(@TypeOf(@as(Fenster, undefined).keys)));
 }
 
-// Attempt to open and close the window.
-// Passes even if no display is available.
-test "fenster: open and close" {
+// Verify the per-OS struct can be constructed and sized portably. Actually
+// opening a window here would flash one on the user's desktop on every
+// `zig build test`; real window behaviour is covered by `zig build smoke`.
+test "fenster: construct and tear down without a display" {
     var buf: [800 * 600]u32 = undefined;
-    var f: Fenster = .{
-        .title = "test",
-        .width = 800,
-        .height = 600,
-        .buf = &buf,
-        .keys = .{0} ** 256,
-        .mod = 0,
-        .x = 0,
-        .y = 0,
-        .mouse = 0,
-    };
+    var f: Fenster = std.mem.zeroes(Fenster);
+    f.title = "test";
+    f.width = 800;
+    f.height = 600;
+    f.buf = @ptrCast(&buf);
 
-    const result = f.open();
-    if (result) |_| {
-        f.close();
-    } else |err| {
-        _ = err;
-    }
+    try std.testing.expectEqual(@as(c_int, 800), f.width);
+    try std.testing.expectEqual(@as(c_int, 600), f.height);
+    try std.testing.expectEqual(@as(usize, 256 * @sizeOf(c_int)), @sizeOf(@TypeOf(f.keys)));
+    // pixel() must land on the right offset for a couple of known coordinates.
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(pixel(&f, 0, 0)) - @intFromPtr(f.buf));
+    try std.testing.expectEqual(
+        @as(usize, @intCast(3 * 800 + 2)) * @sizeOf(u32),
+        @intFromPtr(pixel(&f, 2, 3)) - @intFromPtr(f.buf),
+    );
 }

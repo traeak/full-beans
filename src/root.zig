@@ -6,6 +6,7 @@ pub const fenster_audio = @import("fenster_audio.zig");
 pub const fenster = @import("fenster.zig");
 pub const microui = @import("microui.zig");
 pub const atlas = @import("atlas.zig");
+pub const renderer = @import("renderer.zig");
 
 /// This is a documentation comment to explain the `printAnotherMessage` function below.
 ///
@@ -27,5 +28,7 @@ test "basic add functionality" {
 // them. Without this, a module's tests silently never execute.
 test {
     _ = @import("atlas.zig");
+    _ = @import("fenster.zig");
     _ = @import("microui.zig");
+    _ = @import("renderer.zig");
 }
