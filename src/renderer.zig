@@ -84,10 +84,14 @@ pub const Renderer = struct {
     /// draw-call streams can be diffed directly.
     dump: bool = false,
 
-    pub fn init(f: *fenster.Fenster) Renderer {
-        var r = Renderer{ .f = f };
-        r.clip_rect = mu.Rect.rect(0, 0, f.width, f.height);
-        return r;
+    /// Pointer-based on purpose. `Renderer` is ~590 KB (three 16384-entry
+    /// staging arrays); returning it by value made ReleaseFast lose the
+    /// initialised pointer and crash on an uninitialised `self` (valgrind:
+    /// "Use of uninitialised value of size 8" at the call site). Writing into a
+    /// caller-owned allocation avoids both the copy and the failure mode.
+    pub fn init(self: *Renderer, f: *fenster.Fenster) void {
+        self.* = .{ .f = f };
+        self.clip_rect = mu.Rect.rect(0, 0, f.width, f.height);
     }
 
     /// Draw every queued quad, then reset the buffer.
@@ -338,7 +342,8 @@ test "renderer: greyscale LUT matches r_color(c,c,c,255)" {
 test "renderer: opaque rect writes expected pixels" {
     var fw = try fakeWindow(4, 2);
     defer fw.deinit();
-    var r = Renderer.init(&fw.f);
+    var r: Renderer = undefined;
+    r.init(&fw.f);
     r.clear(mu.Color.color(0, 0, 0, 255));
     r.drawRect(mu.Rect.rect(1, 0, 2, 2), mu.Color.color(255, 0, 0, 255));
     r.flush();
@@ -354,7 +359,8 @@ test "renderer: opaque rect writes expected pixels" {
 test "renderer: clip rect bounds the draw" {
     var fw = try fakeWindow(4, 1);
     defer fw.deinit();
-    var r = Renderer.init(&fw.f);
+    var r: Renderer = undefined;
+    r.init(&fw.f);
     r.clear(mu.Color.color(0, 0, 0, 255));
     r.setClipRect(mu.Rect.rect(2, 0, 10, 10)); // clamped to the window width
     r.drawRect(mu.Rect.rect(0, 0, 4, 1), mu.Color.color(0, 255, 0, 255));
@@ -371,7 +377,8 @@ test "renderer: clip rect bounds the draw" {
 test "renderer: alpha blend path composites over the background" {
     var fw = try fakeWindow(1, 1);
     defer fw.deinit();
-    var r = Renderer.init(&fw.f);
+    var r: Renderer = undefined;
+    r.init(&fw.f);
     r.clear(mu.Color.color(200, 100, 50, 255));
     r.drawRect(mu.Rect.rect(0, 0, 1, 1), mu.Color.color(0, 0, 0, 128));
     r.flush();
@@ -385,7 +392,8 @@ test "renderer: alpha blend path composites over the background" {
 test "renderer: text advance skips utf-8 continuation bytes" {
     var fw = try fakeWindow(64, 16);
     defer fw.deinit();
-    var r = Renderer.init(&fw.f);
+    var r: Renderer = undefined;
+    r.init(&fw.f);
     r.clear(mu.Color.color(0, 0, 0, 255));
     // 'A' and 'B' are one glyph each; the two 0x80 bytes must not add width.
     r.drawText("A\x80\x80B", mu.Vec2.vec2(0, 0), mu.Color.color(255, 255, 255, 255));

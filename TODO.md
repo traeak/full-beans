@@ -178,20 +178,20 @@ sliders, tree, popups, scrolling, live style editing), using the existing
       `Renderer` + `Context`.
 
 ### 8. Parity + performance verification
-- [ ] 8.1 Run C build (`make && ./main`) and Zig build side by side. Screenshot
+- [x] 8.1 Run C build (`make && ./main`) and Zig build side by side. Screenshot
       both. Compare window layout, fonts, colors, widget metrics.
-- [ ] 8.2 Interaction parity checklist — exercise and confirm each: drag window,
+- [x] 8.2 Interaction parity checklist — exercise and confirm each: drag window,
       resize window, close/reopen window, hover states, button press → log line,
       popup open + click items, tree expand/collapse, checkbox toggle, textbox
       type + Enter submit, slider drag (bg color changes), style editor sliders
       change live colors, panel scroll with mouse wheel, ESC quits.
-- [ ] 8.3 Add frame-time instrumentation (reuse `fenster_time`) printing
+- [x] 8.3 Add frame-time instrumentation (reuse `fenster_time`) printing
       avg/max ms per frame every 60 frames, behind a `zig build run -- --timing`
       flag or env var.
-- [ ] 8.4 Measure C vs Zig in the same conditions. Record in `NOTES_perf.md`.
+- [x] 8.4 Measure C vs Zig in the same conditions. Record in `NOTES_perf.md`.
       If Zig `ReleaseSafe` is materially slower, confirm `ReleaseFast` closes the
       gap and note which loop dominates.
-- [ ] 8.5 Long-run check: 5+ minutes, confirm no leak growth, no command-list
+- [x] 8.5 Long-run check: 5+ minutes, confirm no leak growth, no command-list
       overflow, no stack overflow on the id/clip stacks.
 
 ### 9. Cross-platform compile gates
@@ -352,6 +352,16 @@ Surfaced during Phase 0, beyond the original plan. All completed.
       because this X server drops XTEST button events, so `xdotool click` is a
       no-op while `xdotool mousemove` works. Documented there so future
       interaction tests use the right tool.
+
+- [x] **D40 `XEvent` was 144 bytes; the real Xlib XEvent is 192.** The port
+      invented `_pad: [48]u8` on XKeyEvent/XButtonEvent/XMotionEvent (the real
+      structs have none) and `[128]u8` on XEvent. `XNextEvent()` writes
+      `sizeof(XEvent)` = 192 bytes into the caller's variable, so **every event
+      overflowed the stack by 48 bytes**. Invisible in Debug/ReleaseSafe (landed
+      in dead padding); in ReleaseFast it clobbered the spill slot holding the
+      renderer pointer and segfaulted two frames later at `flush(self=0x0)` —
+      a crash site unrelated to its cause. Fixed and pinned with a size-assertion
+      test. Full write-up in `NOTES_perf.md`.
 
 ### Standing lesson for Phases 2–6
 `zig build` passing proves nothing about code the compiler never analyzed. Every

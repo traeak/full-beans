@@ -343,6 +343,14 @@ fn dispatch(app: *App) void {
     }
 }
 
+fn timingRequested(init: std.process.Init) bool {
+    const args = init.minimal.args.toSlice(init.arena.allocator()) catch return false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--timing")) return true;
+    }
+    return false;
+}
+
 fn dumpRequested(init: std.process.Init) bool {
     const args = init.minimal.args.toSlice(init.arena.allocator()) catch return false;
     for (args) |a| {
@@ -365,7 +373,7 @@ pub fn main(init: std.process.Init) !void {
     defer fenster.close(win);
 
     const r = try arena.create(Renderer);
-    r.* = Renderer.init(win);
+    r.init(win);
     r.dump = dumpRequested(init);
 
     const ctx = try arena.create(mu.Context);
@@ -373,6 +381,10 @@ pub fn main(init: std.process.Init) !void {
     mu.init(ctx);
     ctx.text_width = textWidth;
     ctx.text_height = textHeight;
+
+    const timing = timingRequested(init);
+    var frame_times: [60]i64 = undefined;
+    var n_frames: usize = 0;
 
     var app = App{
         .io = io,
@@ -396,6 +408,23 @@ pub fn main(init: std.process.Init) !void {
         r.present();
 
         const painted = fenster.fenster_time(io) - before;
+        if (timing) {
+            frame_times[n_frames % frame_times.len] = painted;
+            n_frames += 1;
+            if (n_frames % frame_times.len == 0) {
+                var sum: i64 = 0;
+                var worst: i64 = 0;
+                for (frame_times) |t| {
+                    sum += t;
+                    if (worst < t) worst = t;
+                }
+                const avg = @divTrunc(sum, @as(i64, @intCast(frame_times.len)));
+                std.debug.print(
+                    "frames {d}..{d}: avg {d} ms  max {d} ms  (budget {d} ms)\n",
+                    .{ n_frames - frame_times.len, n_frames, avg, worst, @divTrunc(1000, FPS) },
+                );
+            }
+        }
         const budget: i64 = @divTrunc(1000, FPS);
         const sleep_ms = budget - painted;
         if (0 < sleep_ms) fenster.fenster_sleep(io, sleep_ms);

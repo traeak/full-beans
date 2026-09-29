@@ -561,12 +561,16 @@ const XImagePrefix = extern struct {
     data: ?[*]u8,
 };
 
+/// MUST be exactly 192 bytes -- the real Xlib `XEvent` is
+/// `char pad[24 * sizeof(long)]`. XNextEvent() writes sizeof(XEvent) bytes into
+/// the caller's variable, so an undersized union silently smashes the stack on
+/// every single event. Verified against <X11/Xlib.h> by the test below.
 const XEvent = extern union {
     type: c_int,
     xkey: XKeyEvent,
     xbutton: XButtonEvent,
     xmotion: XMotionEvent,
-    _pad: [128]u8,
+    _pad: [192]u8,
 };
 
 const XKeyEvent = extern struct {
@@ -585,7 +589,6 @@ const XKeyEvent = extern struct {
     state: c_uint,
     keycode: c_uint,
     same_screen: c_int,
-    _pad: [48]u8,
 };
 
 const XButtonEvent = extern struct {
@@ -604,7 +607,6 @@ const XButtonEvent = extern struct {
     state: c_uint,
     button: c_uint,
     same_screen: c_int,
-    _pad: [48]u8,
 };
 
 const XMotionEvent = extern struct {
@@ -623,7 +625,6 @@ const XMotionEvent = extern struct {
     state: c_uint,
     is_hint: c_int,
     same_screen: c_int,
-    _pad: [48]u8,
 };
 
 // X11 keysym constants (from <X11/keysym.h>).
@@ -961,4 +962,14 @@ test "fenster: construct and tear down without a display" {
         @as(usize, @intCast(3 * 800 + 2)) * @sizeOf(u32),
         @intFromPtr(pixel(&f, 2, 3)) - @intFromPtr(f.buf),
     );
+}
+
+
+// Guards D40: the X11 event structs must match <X11/Xlib.h> byte-for-byte.
+// An undersized XEvent makes XNextEvent() overflow the caller's stack.
+test "X11 struct sizes match the real headers" {
+    try std.testing.expectEqual(@as(usize, 192), @sizeOf(XEvent));
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(XKeyEvent));
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(XButtonEvent));
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(XMotionEvent));
 }
