@@ -11,6 +11,7 @@ const std = @import("std");
 
 /// Clip result codes.
 pub const Clip = enum(c_int) {
+    none = 0,
     part = 1,
     all,
 };
@@ -105,7 +106,7 @@ pub const SLIDER_FMT = "%.2f";
 
 pub const Real = f32;
 pub const Id = u32;
-pub const Font = *const anyopaque;
+pub const Font = ?*const anyopaque;
 
 /// Generic fixed-capacity stack (replaces C `mu_stack` macro).
 pub fn Stack(comptime T: type, comptime n: comptime_int) type {
@@ -375,6 +376,721 @@ pub const OPT_AUTOSIZE: c_int = 1 << 9;
 pub const OPT_POPUP: c_int = 1 << 10;
 pub const OPT_CLOSED: c_int = 1 << 11;
 pub const OPT_EXPANDED: c_int = 1 << 12;
+
+// ---------------------------------------------------------------------------
+// Core -- rect helpers
+// ---------------------------------------------------------------------------
+
+/// Sentinel meaning "no clipping". Matches C's { 0, 0, 0x1000000, 0x1000000 }.
+pub const unclipped_rect: Rect = .{ .x = 0, .y = 0, .w = 0x1000000, .h = 0x1000000 };
+
+pub const default_style: Style = .{
+    .font = null,
+    .size = .{ .x = 68, .y = 10 },
+    .padding = 5,
+    .spacing = 4,
+    .indent = 24,
+    .title_height = 24,
+    .scrollbar_size = 12,
+    .thumb_size = 8,
+    .colors = .{
+        .{ .r = 230, .g = 230, .b = 230, .a = 255 }, // text
+        .{ .r = 25, .g = 25, .b = 25, .a = 255 }, // border
+        .{ .r = 50, .g = 50, .b = 50, .a = 255 }, // window_bg
+        .{ .r = 25, .g = 25, .b = 25, .a = 255 }, // title_bg
+        .{ .r = 240, .g = 240, .b = 240, .a = 255 }, // title_text
+        .{ .r = 0, .g = 0, .b = 0, .a = 0 }, // panel_bg (transparent -> blend)
+        .{ .r = 75, .g = 75, .b = 75, .a = 255 }, // button
+        .{ .r = 95, .g = 95, .b = 95, .a = 255 }, // button_hover
+        .{ .r = 115, .g = 115, .b = 115, .a = 255 }, // button_focus
+        .{ .r = 30, .g = 30, .b = 30, .a = 255 }, // base
+        .{ .r = 35, .g = 35, .b = 35, .a = 255 }, // base_hover
+        .{ .r = 40, .g = 40, .b = 40, .a = 255 }, // base_focus
+        .{ .r = 43, .g = 43, .b = 43, .a = 255 }, // scroll_base
+        .{ .r = 30, .g = 30, .b = 30, .a = 255 }, // scroll_thumb
+    },
+};
+
+fn expandRect(r: Rect, n: c_int) Rect {
+    return Rect.rect(r.x - n, r.y - n, r.w + n * 2, r.h + n * 2);
+}
+
+fn intersectRects(r1: Rect, r2: Rect) Rect {
+    const x1 = @max(r1.x, r2.x);
+    const y1 = @max(r1.y, r2.y);
+    var x2 = @min(r1.x + r1.w, r2.x + r2.w);
+    var y2 = @min(r1.y + r1.h, r2.y + r2.h);
+    if (x2 < x1) x2 = x1;
+    if (y2 < y1) y2 = y1;
+    return Rect.rect(x1, y1, x2 - x1, y2 - y1);
+}
+
+fn rectOverlapsVec2(r: Rect, p: Vec2) bool {
+    return p.x >= r.x and p.x < r.x + r.w and p.y >= r.y and p.y < r.y + r.h;
+}
+
+/// Default draw_frame callback: fill with the style color, then a 1px border for
+/// everything except the three colors that are drawn borderless.
+fn drawFrame(ctx: *Context, rect: Rect, colorid: c_int) void {
+    drawRect(ctx, rect, ctx.style.colors[@intCast(colorid)]);
+    if (colorid == @intFromEnum(ColorId.scroll_base) or
+        colorid == @intFromEnum(ColorId.scroll_thumb) or
+        colorid == @intFromEnum(ColorId.title_bg)) {
+        return;
+    }
+    if (ctx.style.colors[@intFromEnum(ColorId.border)].a != 0) {
+        drawBox(ctx, expandRect(rect, 1), ctx.style.colors[@intFromEnum(ColorId.border)]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Core -- command arena
+//
+// Plan decision 2c: keep C's byte-arena layout. Records are variable sized and
+// walked by `base.size`, and mu_end patches absolute intra-arena jump targets.
+// Record sizes are rounded up to @alignOf(Command) so every @alignCast below is
+// provably satisfied -- C got away with unaligned records on x86, Zig must not
+// assume it. The rounding is invisible to callers: push and next agree on size.
+// ---------------------------------------------------------------------------
+
+pub const Error = error{
+    CommandListFull,
+};
+
+const cmd_align: usize = @alignOf(Command);
+
+fn roundUp(n: usize) usize {
+    return (n + cmd_align - 1) & ~(cmd_align - 1);
+}
+
+/// Raw byte base of the command arena.
+fn arena(self: *Context) [*]u8 {
+    return &self.command_list.items;
+}
+
+fn arenaEnd(self: *Context) [*]u8 {
+    return arena(self) + self.command_list.idx;
+}
+
+/// Append `total` bytes of record of type T at the arena cursor and return it.
+/// `total` must already be rounded and must be >= @sizeOf(T).
+fn pushRecord(self: *Context, comptime T: type, total: usize, comptime kind: CommandType) Error!*T {
+    const start = self.command_list.idx;
+    if (start + total >= COMMANDLIST_SIZE) return Error.CommandListFull;
+    const p: *T = @ptrCast(@alignCast(arena(self) + start));
+    p.* = std.mem.zeroes(T);
+    const base: *BaseCommand = @ptrCast(p);
+    base.* = .{ .type = kind, .size = @intCast(total) };
+    self.command_list.idx = start + total;
+    return p;
+}
+
+pub fn pushCommand(self: *Context, comptime T: type, comptime kind: CommandType) Error!*T {
+    return pushRecord(self, T, roundUp(@sizeOf(T)), kind);
+}
+
+/// Walk the arena, following jump records, and return the next non-jump command.
+/// Mirrors mu_next_command: pass a null `cmd` to start from the beginning.
+pub fn nextCommand(self: *Context, cmd: *?*Command) bool {
+    var p: [*]u8 = if (cmd.*) |c|
+        @as([*]u8, @ptrCast(c)) + @as(usize, @intCast(c.base.size))
+    else
+        arena(self);
+
+    while (p != arenaEnd(self)) {
+        const c: *Command = @ptrCast(@alignCast(p));
+        if (c.*.type != .jump) {
+            cmd.* = c;
+            return true;
+        }
+        p = @ptrCast(@alignCast(c.*.jump.dst.?));
+    }
+    cmd.* = null;
+    return false;
+}
+
+fn pushJump(self: *Context, dst: ?*Command) Error!*JumpCommand {
+    const cmd = try pushCommand(self, JumpCommand, .jump);
+    cmd.dst = dst;
+    return cmd;
+}
+
+pub fn setClip(ctx: *Context, rect: Rect) Error!void {
+    const cmd = try pushCommand(ctx, ClipCommand, .clip);
+    cmd.rect = rect;
+}
+
+pub fn drawRect(ctx: *Context, rect: Rect, color: Color) void {
+    const r = intersectRects(rect, getClipRect(ctx));
+    if (r.w != 0 and r.h != 0) {
+        const cmd = pushCommand(ctx, RectCommand, .rect) catch return;
+        cmd.rect = r;
+        cmd.color = color;
+    }
+}
+
+pub fn drawBox(ctx: *Context, rect: Rect, color: Color) void {
+    drawRect(ctx, Rect.rect(rect.x + 1, rect.y, rect.w - 2, 1), color);
+    drawRect(ctx, Rect.rect(rect.x + 1, rect.y + rect.h - 1, rect.w - 2, 1), color);
+    drawRect(ctx, Rect.rect(rect.x, rect.y, 1, rect.h), color);
+    drawRect(ctx, Rect.rect(rect.x + rect.w - 1, rect.y, 1, rect.h), color);
+}
+
+pub fn drawText(ctx: *Context, font: Font, str: []const u8, pos: Vec2, color: Color) void {
+    const rect = Rect.rect(
+        pos.x,
+        pos.y,
+        ctx.text_width.?(font, str, @intCast(str.len)),
+        ctx.text_height.?(font),
+    );
+    const clipped = checkClip(ctx, rect);
+    if (clipped == .all) return;
+    if (clipped == .part) setClip(ctx, getClipRect(ctx)) catch return;
+
+    // C allocates sizeof(TextCommand) + len: the struct's inline [1]u8 plus `len`
+    // extra bytes, which hold the string and its NUL terminator.
+    const total = roundUp(@sizeOf(TextCommand) + str.len);
+    const cmd = pushRecord(ctx, TextCommand, total, .text) catch return;
+    cmd.pos = pos;
+    cmd.color = color;
+    cmd.font = font;
+    const dst: [*]u8 = @ptrCast(&cmd.str);
+    @memcpy(dst[0..str.len], str);
+    dst[str.len] = 0;
+
+    if (clipped != .none) setClip(ctx, unclipped_rect) catch return;
+}
+
+pub fn drawIcon(ctx: *Context, id: c_int, rect: Rect, color: Color) void {
+    const clipped = checkClip(ctx, rect);
+    if (clipped == .all) return;
+    if (clipped == .part) setClip(ctx, getClipRect(ctx)) catch return;
+    const cmd = pushCommand(ctx, IconCommand, .icon) catch return;
+    cmd.id = id;
+    cmd.rect = rect;
+    cmd.color = color;
+    if (clipped != .none) setClip(ctx, unclipped_rect) catch return;
+}
+
+// ---------------------------------------------------------------------------
+// Core -- lifecycle
+// ---------------------------------------------------------------------------
+
+pub fn init(ctx: *Context) void {
+    ctx.* = .{};
+    ctx.draw_frame = drawFrame;
+    ctx._style = default_style;
+    ctx.style = &ctx._style;
+    // NOTE: C's mu_init memsets and leaves clip_stack EMPTY. A container push
+    // (mu_push_clip_rect in begin_window/begin_panel) is what establishes the
+    // initial clip; mu_end then asserts the stack is balanced back to 0. Do not
+    // pre-push unclipped_rect here -- it breaks that balance.
+}
+
+pub fn begin(ctx: *Context) void {
+    std.debug.assert(ctx.text_width != null);
+    std.debug.assert(ctx.text_height != null);
+    ctx.command_list.idx = 0;
+    ctx.root_list.idx = 0;
+    ctx.scroll_target = null;
+    ctx.hover_root = ctx.next_hover_root;
+    ctx.next_hover_root = null;
+    ctx.mouse_delta = Vec2.vec2(
+        ctx.mouse_pos.x - ctx.last_mouse_pos.x,
+        ctx.mouse_pos.y - ctx.last_mouse_pos.y,
+    );
+    ctx.frame += 1;
+}
+
+fn zindexLess(_: void, a: ?*Container, b: ?*Container) bool {
+    return a.?.*.zindex < b.?.*.zindex;
+}
+
+pub fn end(ctx: *Context) void {
+    std.debug.assert(ctx.container_stack.idx == 0);
+    std.debug.assert(ctx.clip_stack.idx == 0);
+    std.debug.assert(ctx.id_stack.idx == 0);
+    std.debug.assert(ctx.layout_stack.idx == 0);
+
+    if (ctx.scroll_target) |st| {
+        st.scroll.x += ctx.scroll_delta.x;
+        st.scroll.y += ctx.scroll_delta.y;
+    }
+
+    // Unset focus if the focus id was not touched this frame.
+    if (ctx.updated_focus == 0) ctx.focus = 0;
+    ctx.updated_focus = 0;
+
+    // Bring the hovered root to the front when the mouse was pressed on it.
+    if (ctx.mouse_pressed != 0 and ctx.next_hover_root != null and
+        ctx.next_hover_root.?.*.zindex < ctx.last_zindex and
+        ctx.next_hover_root.?.*.zindex >= 0)
+    {
+        bringToFront(ctx, ctx.next_hover_root.?);
+    }
+
+    // Reset per-frame input state.
+    ctx.key_pressed = 0;
+    ctx.input_text[0] = 0;
+    ctx.mouse_pressed = 0;
+    ctx.scroll_delta = Vec2.vec2(0, 0);
+    ctx.last_mouse_pos = ctx.mouse_pos;
+
+    // Sort root containers by zindex. C qsorts the *pointer array*, leaving the
+    // Container structs themselves in place -- the head/tail pointers embedded in
+    // them stay valid only because of that. Sorting the containers would corrupt
+    // the jump chain. (Risk R2.)
+    const roots = ctx.root_list.items[0..@intCast(ctx.root_list.idx)];
+    std.sort.insertion(?*Container, roots, {}, zindexLess);
+
+    // Wire the jump chain: first command jumps into container 0, each container's
+    // tail jumps to the next container's head, last tail jumps to the arena end.
+    const n = roots.len;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const cnt = roots[i].?;
+        if (i == 0) {
+            const first: *Command = @ptrCast(@alignCast(arena(ctx)));
+            first.*.jump.dst = @ptrCast(@alignCast(
+                @as([*]u8, @ptrCast(cnt.head.?)) + @sizeOf(JumpCommand),
+            ));
+        } else {
+            const prev = roots[i - 1].?;
+            prev.tail.?.*.jump.dst = @ptrCast(@alignCast(
+                @as([*]u8, @ptrCast(cnt.head.?)) + @sizeOf(JumpCommand),
+            ));
+        }
+        if (i + 1 == n) {
+            cnt.tail.?.*.jump.dst = @ptrCast(@alignCast(arenaEnd(ctx)));
+        }
+    }
+}
+
+pub fn setFocus(ctx: *Context, id: Id) void {
+    ctx.focus = id;
+    ctx.updated_focus = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Core -- ids
+// ---------------------------------------------------------------------------
+
+/// 32-bit FNV-1a, identical constants to C.
+const HASH_INITIAL: Id = 2166136261;
+const HASH_PRIME: Id = 16777619;
+
+fn fnvHash(hash: *Id, data: []const u8) void {
+    for (data) |b| {
+        hash.* = (hash.* ^ @as(Id, b)) *% HASH_PRIME;
+    }
+}
+
+pub fn getId(ctx: *Context, data: []const u8) Id {
+    const idx = ctx.id_stack.idx;
+    var res: Id = if (0 < idx) ctx.id_stack.items[idx - 1] else HASH_INITIAL;
+    fnvHash(&res, data);
+    ctx.last_id = res;
+    return res;
+}
+
+pub fn pushId(ctx: *Context, data: []const u8) void {
+    ctx.id_stack.push(getId(ctx, data));
+}
+
+pub fn popId(ctx: *Context) void {
+    ctx.id_stack.pop();
+}
+
+// ---------------------------------------------------------------------------
+// Core -- clip stack
+// ---------------------------------------------------------------------------
+
+pub fn pushClipRect(ctx: *Context, rect: Rect) void {
+    ctx.clip_stack.push(intersectRects(rect, getClipRect(ctx)));
+}
+
+pub fn popClipRect(ctx: *Context) void {
+    ctx.clip_stack.pop();
+}
+
+pub fn getClipRect(ctx: *Context) Rect {
+    std.debug.assert(0 < ctx.clip_stack.idx);
+    return ctx.clip_stack.items[ctx.clip_stack.idx - 1];
+}
+
+pub fn checkClip(ctx: *Context, r: Rect) Clip {
+    const cr = getClipRect(ctx);
+    if (cr.x + cr.w < r.x or r.x + r.w < cr.x or
+        cr.y + cr.h < r.y or r.y + r.h < cr.y) {
+        return .all;
+    }
+    if (r.x >= cr.x and r.x + r.w <= cr.x + cr.w and
+        r.y >= cr.y and r.y + r.h <= cr.y + cr.h) {
+        return .none;
+    }
+    return .part;
+}
+
+// ---------------------------------------------------------------------------
+// Core -- containers
+// ---------------------------------------------------------------------------
+
+pub fn getCurrentContainer(ctx: *Context) *Container {
+    std.debug.assert(0 < ctx.container_stack.idx);
+    return ctx.container_stack.items[ctx.container_stack.idx - 1].?;
+}
+
+fn getLayout(ctx: *Context) *Layout {
+    return &ctx.layout_stack.items[ctx.layout_stack.idx - 1];
+}
+
+fn pushLayout(ctx: *Context, body: Rect, scroll: Vec2) void {
+    var layout: Layout = std.mem.zeroes(Layout);
+    layout.body = Rect.rect(body.x - scroll.x, body.y - scroll.y, body.w, body.h);
+    layout.max = Vec2.vec2(-0x1000000, -0x1000000);
+    ctx.layout_stack.push(layout);
+    var width: c_int = 0;
+    layoutRow(ctx, 1, @as([*]const c_int, @ptrCast(&width)), 0);
+}
+
+fn popContainer(ctx: *Context) void {
+    const cnt = getCurrentContainer(ctx);
+    const layout = getLayout(ctx);
+    cnt.content_size.x = layout.max.x - layout.body.x;
+    cnt.content_size.y = layout.max.y - layout.body.y;
+    ctx.container_stack.pop();
+    ctx.layout_stack.pop();
+    popId(ctx);
+}
+
+pub fn getContainerByName(ctx: *Context, name: []const u8) ?*Container {
+    return getContainer(ctx, getId(ctx, name), 0);
+}
+
+fn getContainer(ctx: *Context, id: Id, opt: c_int) ?*Container {
+    const idx = poolGet(ctx, &ctx.container_pool, id);
+    if (0 <= idx) {
+        if (ctx.containers[idx].open != 0 or (opt & OPT_CLOSED) == 0) {
+            poolUpdate(ctx, &ctx.container_pool, idx);
+        }
+        return &ctx.containers[idx];
+    }
+    if (opt & OPT_CLOSED != 0) return null;
+    const ni = poolInit(ctx, &ctx.container_pool, id);
+    const cnt = &ctx.containers[ni];
+    cnt.* = std.mem.zeroes(Container);
+    cnt.open = 1;
+    bringToFront(ctx, cnt);
+    return cnt;
+}
+
+pub fn bringToFront(ctx: *Context, cnt: *Container) void {
+    ctx.last_zindex += 1;
+    cnt.zindex = ctx.last_zindex;
+}
+
+// ---------------------------------------------------------------------------
+// Layout
+// ---------------------------------------------------------------------------
+
+const RELATIVE = 1;
+const ABSOLUTE = 2;
+
+pub fn layoutBeginColumn(ctx: *Context) void {
+    pushLayout(ctx, layoutNext(ctx), Vec2.vec2(0, 0));
+}
+
+pub fn layoutEndColumn(ctx: *Context) void {
+    const b = getLayout(ctx);
+    ctx.layout_stack.pop();
+    // Inherit position / next_row / max from the child layout if they are greater.
+    const a = getLayout(ctx);
+    a.position.x = @max(a.position.x, b.position.x + b.body.x - a.body.x);
+    a.next_row = @max(a.next_row, b.next_row + b.body.y - a.body.y);
+    a.max.x = @max(a.max.x, b.max.x);
+    a.max.y = @max(a.max.y, b.max.y);
+}
+
+pub fn layoutRow(ctx: *Context, items: c_int, widths: ?[]const c_int, height: c_int) void {
+    const layout = getLayout(ctx);
+    if (widths) |w| {
+        std.debug.assert(items <= MAX_WIDTHS);
+        @memcpy(layout.widths[0..@intCast(items)], w[0..@intCast(items)]);
+    }
+    layout.items = items;
+    layout.position = Vec2.vec2(layout.indent, layout.next_row);
+    layout.size.y = height;
+    layout.item_index = 0;
+}
+
+pub fn layoutWidth(ctx: *Context, width: c_int) void {
+    getLayout(ctx).size.x = width;
+}
+
+pub fn layoutHeight(ctx: *Context, height: c_int) void {
+    getLayout(ctx).size.y = height;
+}
+
+pub fn layoutSetNext(ctx: *Context, r: Rect, relative: bool) void {
+    const layout = getLayout(ctx);
+    layout.next = r;
+    layout.next_type = if (relative) RELATIVE else ABSOLUTE;
+}
+
+pub fn layoutNext(ctx: *Context) Rect {
+    const layout = getLayout(ctx);
+    const style = ctx.style;
+    var res: Rect = undefined;
+
+    if (layout.next_type != 0) {
+        // Handle a rect explicitly set by layoutSetNext.
+        const kind = layout.next_type;
+        layout.next_type = 0;
+        res = layout.next;
+        if (kind == ABSOLUTE) {
+            ctx.last_rect = res;
+            return res;
+        }
+    } else {
+        // Handle next row.
+        if (layout.item_index == layout.items) {
+            layoutRow(ctx, layout.items, null, layout.size.y);
+        }
+        res.x = layout.position.x;
+        res.y = layout.position.y;
+        res.w = if (0 < layout.items) layout.widths[@intCast(layout.item_index)] else layout.size.x;
+        res.h = layout.size.y;
+        if (res.w == 0) res.w = style.size.x + style.padding * 2;
+        if (res.h == 0) res.h = style.size.y + style.padding * 2;
+        // Negative widths/heights are relative to the remaining body extent.
+        if (res.w < 0) res.w += layout.body.w - res.x + 1;
+        if (res.h < 0) res.h += layout.body.h - res.y + 1;
+        layout.item_index += 1;
+    }
+
+    layout.position.x += res.w + style.spacing;
+    layout.next_row = @max(layout.next_row, res.y + res.h + style.spacing);
+
+    res.x += layout.body.x;
+    res.y += layout.body.y;
+
+    layout.max.x = @max(layout.max.x, res.x + res.w);
+    layout.max.y = @max(layout.max.y, res.y + res.h);
+
+    ctx.last_rect = res;
+    return res;
+}
+
+// ---------------------------------------------------------------------------
+// Core -- pools (LRU by frame)
+// ---------------------------------------------------------------------------
+
+pub fn poolInit(ctx: *Context, items: []PoolItem, id: Id) usize {
+    var f = ctx.frame;
+    var n: isize = -1;
+    for (items, 0..) |it, i| {
+        if (it.last_update < f) {
+            f = it.last_update;
+            n = @intCast(i);
+        }
+    }
+    std.debug.assert(0 <= n);
+    const idx: usize = @intCast(n);
+    items[idx].id = id;
+    poolUpdate(ctx, items, idx);
+    return idx;
+}
+
+pub fn poolGet(ctx: *Context, items: []const PoolItem, id: Id) isize {
+    _ = ctx;
+    for (items, 0..) |it, i| {
+        if (it.id == id) return @intCast(i);
+    }
+    return -1;
+}
+
+pub fn poolUpdate(ctx: *Context, items: []PoolItem, idx: usize) void {
+    items[idx].last_update = ctx.frame;
+}
+
+// ---------------------------------------------------------------------------
+// Core -- input handlers
+// ---------------------------------------------------------------------------
+
+pub fn inputMousemove(ctx: *Context, x: c_int, y: c_int) void {
+    ctx.mouse_pos = Vec2.vec2(x, y);
+}
+
+pub fn inputMousedown(ctx: *Context, x: c_int, y: c_int, btn: c_int) void {
+    inputMousemove(ctx, x, y);
+    ctx.mouse_down |= btn;
+    ctx.mouse_pressed |= btn;
+}
+
+pub fn inputMouseup(ctx: *Context, x: c_int, y: c_int, btn: c_int) void {
+    inputMousemove(ctx, x, y);
+    ctx.mouse_down &= ~btn;
+}
+
+pub fn inputScroll(ctx: *Context, x: c_int, y: c_int) void {
+    ctx.scroll_delta.x += x;
+    ctx.scroll_delta.y += y;
+}
+
+pub fn inputKeydown(ctx: *Context, key: c_int) void {
+    ctx.key_pressed |= key;
+    ctx.key_down |= key;
+}
+
+pub fn inputKeyup(ctx: *Context, key: c_int) void {
+    ctx.key_down &= ~key;
+}
+
+pub fn inputText(ctx: *Context, text: []const u8) void {
+    const len = std.mem.indexOfScalar(u8, &ctx.input_text, 0) orelse ctx.input_text.len;
+    const size = text.len + 1;
+    std.debug.assert(len + size <= ctx.input_text.len);
+    @memcpy(ctx.input_text[len..][0..size], text);
+    ctx.input_text[len + text.len] = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Tests -- expectations generated from the C implementation (microui.c) so the
+// port is checked against authoritative values, not against itself.
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+fn cTextWidth(font: Font, str: []const u8, len: c_int) c_int {
+    _ = font;
+    const n: usize = if (len < 0) str.len else @intCast(len);
+    return @intCast(n * 7);
+}
+
+fn cTextHeight(font: Font) c_int {
+    _ = font;
+    return 18;
+}
+
+fn testContext() Context {
+    var ctx: Context = undefined;
+    init(&ctx);
+    ctx.text_width = cTextWidth;
+    ctx.text_height = cTextHeight;
+    // Seed the clip stack the way begin_window_ex does (C line 1068).
+    ctx.clip_stack.push(unclipped_rect);
+    return ctx;
+}
+
+test "microui: id stability matches C FNV-1a" {
+    var ctx = testContext();
+    try testing.expectEqual(@as(Id, 2166136261), getId(&ctx, ""));
+    try testing.expectEqual(@as(Id, 2949673445), getId(&ctx, "test"));
+    pushId(&ctx, "outer");
+    try testing.expectEqual(@as(Id, 2718680436), ctx.id_stack.items[0]);
+    try testing.expectEqual(@as(Id, 1009144564), getId(&ctx, "inner"));
+    popId(&ctx);
+    // After popping the parent, "test" must hash back to the same value.
+    try testing.expectEqual(@as(Id, 2949673445), getId(&ctx, "test"));
+    try testing.expectEqual(@as(Id, 2949673445), ctx.last_id);
+}
+
+test "microui: command arena round-trip" {
+    var ctx = testContext();
+    begin(&ctx);
+    ctx.command_list.idx = 0;
+
+    drawRect(&ctx, Rect.rect(10, 10, 20, 20), Color.color(255, 0, 0, 255));
+    drawText(&ctx, null, "hi", Vec2.vec2(30, 40), Color.color(0, 255, 0, 255));
+    drawIcon(&ctx, 3, Rect.rect(50, 60, 16, 16), Color.color(0, 0, 255, 255));
+    try setClip(&ctx, Rect.rect(1, 2, 3, 4));
+    drawBox(&ctx, Rect.rect(70, 80, 30, 30), Color.color(1, 2, 3, 4));
+
+    // C emitted 8 commands with sizes 28/34/32/24/28/28/28/28. The port rounds
+    // every record up to @alignOf(Command) so @alignCast is provably satisfied
+    // (C left text records 2-byte aligned and relied on x86 tolerating it).
+    const expect_types = [_]CommandType{ .rect, .text, .icon, .clip, .rect, .rect, .rect, .rect };
+    const expect_sizes = [_]usize{ 32, 40, 32, 24, 32, 32, 32, 32 };
+
+    var c: ?*Command = null;
+    var n: usize = 0;
+    while (nextCommand(&ctx, &c)) : (n += 1) {
+        try testing.expect(n < expect_types.len);
+        const cmd = c.?;
+        try testing.expectEqual(expect_types[n], cmd.*.type);
+        try testing.expectEqual(@as(c_int, @intCast(expect_sizes[n])), cmd.*.base.size);
+    }
+    try testing.expectEqual(@as(usize, 8), n);
+    try testing.expectEqual(@as(usize, 256), ctx.command_list.idx);
+}
+
+test "microui: text payload survives the arena round-trip" {
+    var ctx = testContext();
+    begin(&ctx);
+    ctx.command_list.idx = 0;
+    drawText(&ctx, null, "hello world", Vec2.vec2(5, 6), Color.color(9, 9, 9, 255));
+
+    var c: ?*Command = null;
+    try testing.expect(nextCommand(&ctx, &c));
+    const cmd = c.?;
+    try testing.expectEqual(CommandType.text, cmd.*.type);
+    const s: [*]const u8 = @ptrCast(&cmd.*.text.str);
+    try testing.expectEqualStrings("hello world", s[0..11]);
+    try testing.expectEqual(@as(u8, 0), s[11]);
+    try testing.expectEqual(@as(c_int, 5), cmd.*.text.pos.x);
+}
+
+test "microui: layout_next matches C" {
+    var ctx = testContext();
+    begin(&ctx);
+    ctx.layout_stack.idx = 0;
+    var l: Layout = std.mem.zeroes(Layout);
+    l.body = Rect.rect(0, 0, 400, 300);
+    l.max = Vec2.vec2(-0x1000000, -0x1000000);
+    ctx.layout_stack.push(l);
+
+    const widths = [_]c_int{ 86, -110, -1 };
+    layoutRow(&ctx, 3, &widths, 0);
+
+    const expect = [_]Rect{
+        Rect.rect(0, 0, 86, 20),
+        Rect.rect(90, 0, 201, 20),
+        Rect.rect(295, 0, 105, 20),
+        Rect.rect(0, 24, 86, 20),
+        Rect.rect(90, 24, 201, 20),
+        Rect.rect(295, 24, 105, 20),
+    };
+    for (expect) |e| {
+        try testing.expectEqual(e, layoutNext(&ctx));
+    }
+}
+
+test "microui: checkClip" {
+    var ctx = testContext();
+    ctx.clip_stack.pop();
+    ctx.clip_stack.push(Rect.rect(10, 10, 100, 100));
+    try testing.expectEqual(Clip.all, checkClip(&ctx, Rect.rect(200, 200, 10, 10)));
+    try testing.expectEqual(Clip.none, checkClip(&ctx, Rect.rect(20, 20, 10, 10)));
+    try testing.expectEqual(Clip.part, checkClip(&ctx, Rect.rect(90, 90, 50, 50)));
+}
+
+test "microui: pool is LRU by frame" {
+    var ctx = testContext();
+    // poolInit picks the item with the smallest last_update strictly less than the
+    // current frame, so frame must be >= 1. C relies on mu_begin() incrementing
+    // the frame before any control runs; at frame 0 both implementations fail to
+    // find an eviction candidate.
+    ctx.frame = 1;
+    var items: [4]PoolItem = undefined;
+    @memset(&items, .{ .id = 0, .last_update = 0 });
+    const a = poolInit(&ctx, &items, 111);
+    ctx.frame += 1;
+    const b = poolInit(&ctx, &items, 222);
+    try testing.expect(a != b);
+    try testing.expectEqual(@as(isize, 0), poolGet(&ctx, &items, 111));
+    try testing.expectEqual(@as(isize, 1), poolGet(&ctx, &items, 222));
+    try testing.expectEqual(@as(isize, -1), poolGet(&ctx, &items, 333));
+}
 
 // ---------------------------------------------------------------------------
 // Comptime assertions

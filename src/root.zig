@@ -27,4 +27,5 @@ test "basic add functionality" {
 // them. Without this, a module's tests silently never execute.
 test {
     _ = @import("atlas.zig");
+    _ = @import("microui.zig");
 }

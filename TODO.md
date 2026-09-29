@@ -75,41 +75,41 @@ sliders, tree, popups, scrolling, live style editing), using the existing
       assets when `atlas.inl` changes (or document the manual `make atlas` step).
 
 ### 2. microui core plumbing
-- [ ] 2.1 Audit `Stack(T, n)` in `src/microui.zig`: confirm `.items` is a
+- [x] 2.1 Audit `Stack(T, n)` in `src/microui.zig`: confirm `.items` is a
       contiguous fixed array and `.idx` is the C-equivalent write cursor. Add
       comptime asserts on `@sizeOf(Stack(u8, COMMANDLIST_SIZE))`.
-- [ ] 2.2 Port `unclipped_rect`, `default_style` constants.
-- [ ] 2.3 Port `expandRect`, `intersectRects`, `rectOverlapsVec2` (pure, no ctx).
-- [ ] 2.4 Port `drawFrame` (the default `draw_frame` callback).
-- [ ] 2.5 Port `init` / `begin` / `setFocus`.
-- [ ] 2.6 Port `fnvHash` + `getId` + `pushId` + `popId`.
+- [x] 2.2 Port `unclipped_rect`, `default_style` constants.
+- [x] 2.3 Port `expandRect`, `intersectRects`, `rectOverlapsVec2` (pure, no ctx).
+- [x] 2.4 Port `drawFrame` (the default `draw_frame` callback).
+- [x] 2.5 Port `init` / `begin` / `setFocus`.
+- [x] 2.6 Port `fnvHash` + `getId` + `pushId` + `popId`.
       Must produce **byte-identical ids to C** — hash over the same bytes.
-- [ ] 2.7 Port `pushClipRect` / `popClipRect` / `getClipRect` / `checkClip`.
-- [ ] 2.8 Port `getCurrentContainer` / `getContainer` / `bringToFront`.
-- [ ] 2.9 Port pool fns: `poolInit` / `poolGet` / `poolUpdate` (LRU by
+- [x] 2.7 Port `pushClipRect` / `popClipRect` / `getClipRect` / `checkClip`.
+- [x] 2.8 Port `getCurrentContainer` / `getContainer` / `bringToFront`.
+- [x] 2.9 Port pool fns: `poolInit` / `poolGet` / `poolUpdate` (LRU by
       `last_update`).
-- [ ] 2.10 Port input handlers: `inputMousemove` / `inputMousedown` /
+- [x] 2.10 Port input handlers: `inputMousemove` / `inputMousedown` /
       `inputMouseup` / `inputScroll` / `inputKeydown` / `inputKeyup` /
       `inputText`.
-- [ ] 2.11 Port command layer: `pushCommand`, `pushJump`, `setClip`,
+- [x] 2.11 Port command layer: `pushCommand`, `pushJump`, `setClip`,
       `drawRect`, `drawBox`, `drawText`, `drawIcon` — writing into the raw
       `command_list` byte arena via `@ptrCast`/`@alignCast`.
-- [ ] 2.12 Port `nextCommand` (the `base.size` walk + JUMP-follow loop).
+- [x] 2.12 Port `nextCommand` (the `base.size` walk + JUMP-follow loop).
       **Critical:** must terminate at the arena end sentinel exactly like C.
-- [ ] 2.13 Port `end` including the zindex sort + jump-chain patch-up (R2).
-- [ ] 2.14 Unit test: id stability. Feed a fixed sequence of
+- [x] 2.13 Port `end` including the zindex sort + jump-chain patch-up (R2).
+- [x] 2.14 Unit test: id stability. Feed a fixed sequence of
       `pushId`/`getId` calls, assert exact expected u32 values.
-- [ ] 2.15 Unit test: command round-trip. Emit a known sequence of
+- [x] 2.15 Unit test: command round-trip. Emit a known sequence of
       drawRect/drawText/drawIcon/setClip, then walk with `nextCommand` and
       assert the decoded stream matches, including jump ordering.
 
 ### 3. microui layout
-- [ ] 3.1 Port `layoutBeginColumn` / `layoutEndColumn`.
-- [ ] 3.2 Port `layoutRow` (widths array incl. negative-width semantics).
-- [ ] 3.3 Port `layoutWidth` / `layoutHeight` / `layoutSetNext`.
-- [ ] 3.4 Port `layoutNext` — the largest layout function; preserve
+- [x] 3.1 Port `layoutBeginColumn` / `layoutEndColumn`.
+- [x] 3.2 Port `layoutRow` (widths array incl. negative-width semantics).
+- [x] 3.3 Port `layoutWidth` / `layoutHeight` / `layoutSetNext`.
+- [x] 3.4 Port `layoutNext` — the largest layout function; preserve
       `next_row` / `next_type` / indent / max-width bookkeeping exactly.
-- [ ] 3.5 Unit test: drive a fixed sequence of `layoutRow` + `layoutNext` calls
+- [x] 3.5 Unit test: drive a fixed sequence of `layoutRow` + `layoutNext` calls
       and assert the emitted rects match C output (generate the C expectations
       by running the C binary with a trace, or hand-compute).
 
@@ -248,6 +248,24 @@ Surfaced during Phase 0, beyond the original plan. All completed.
       Removed the inner consts (the top-level `RES_*` already exist).
 - [x] **D16** `@embedFile` returns `*const [N:0]u8`; annotate the target as a
       `[]const u8` slice (or a fixed array), not `*const [0]u8`.
+
+- [x] **D17** C's `mu_init` leaves `clip_stack` **empty** — the seed push happens
+      inside `begin_window_ex` (microui.c:1068: `push(ctx->clip_stack,
+      unclipped_rect)`). Pre-pushing it in `init` breaks `mu_end`'s
+      `clip_stack.idx == 0` balance assert. Port now matches C.
+- [x] **D18** `poolInit` cannot evict at `frame == 0` (needs an item with
+      `last_update < frame`). Identical in C — it relies on `mu_begin()` having
+      incremented the frame first. Documented in the test.
+- [x] **D19** `Font` had to become `?*const anyopaque`; `default_style.font` is
+      NULL in C, so a non-nullable `*const anyopaque` could not represent it.
+- [x] **D20** C leaves text command records **2-byte aligned** (size 34 for
+      "hi") and relies on x86 tolerating the unaligned struct access. The port
+      rounds every record to `@alignOf(Command)` (40), which is what makes the
+      `@alignCast` in `pushRecord`/`nextCommand` provably safe. Invisible to
+      callers — push and next agree on the size. Deliberate 2c divergence.
+- [x] **D21** Test expectations are generated from the **C implementation**
+      (`/tmp/c_trace.c` compiled against `microui.c`), not hand-written, so the
+      port is checked against authoritative values rather than against itself.
 
 ### Standing lesson for Phases 2–6
 `zig build` passing proves nothing about code the compiler never analyzed. Every
