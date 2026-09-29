@@ -7,6 +7,7 @@
 const std = @import("std");
 const mem = std.mem;
 const c = std.c;
+const builtin = @import("builtin");
 
 pub const FensterAudioError = error{
     DeviceOpen,
@@ -89,14 +90,14 @@ const FensterAudioLinux = extern struct {
 };
 
 /// Audio output context. Selects the platform-specific struct at compile time.
-pub const FensterAudio: type = if (std.target.os.tag == .macos)
+pub const FensterAudio: type = if (builtin.target.os.tag == .macos)
     FensterAudioMacos
-else if (std.target.os.tag == .windows)
+else if (builtin.target.os.tag == .windows)
     FensterAudioWindows
-else if (std.target.os.tag == .linux)
+else if (builtin.target.os.tag == .linux)
     FensterAudioLinux
 else
-    @compileError("fenster_audio: unsupported OS " ++ @tagName(std.target.os.tag));
+    @compileError("fenster_audio: unsupported OS " ++ @tagName(builtin.target.os.tag));
 
 // ---------------------------------------------------------------------------
 // macOS — AudioToolbox / libdispatch extern declarations
@@ -244,7 +245,7 @@ fn audioQueueCallback(
 ///
 /// On Linux this can fail if the PCM device is unavailable.
 pub fn fenster_audio_open(fa: *FensterAudio) FensterAudioError!void {
-    if (std.target.os.tag == .macos) {
+    if (builtin.target.os.tag == .macos) {
         const fa_mac: *FensterAudioMacos = @ptrCast(@alignCast(fa));
         const format = AudioStreamBasicDescription{
             .mSampleRate = @floatFromInt(sample_rate),
@@ -289,7 +290,7 @@ pub fn fenster_audio_open(fa: *FensterAudio) FensterAudioError!void {
         }
 
         _ = AudioQueueStart(queue, null);
-    } else if (std.target.os.tag == .windows) {
+    } else if (builtin.target.os.tag == .windows) {
         const fa_win: *FensterAudioWindows = @ptrCast(@alignCast(fa));
         const wfx = WAVEFORMATEX{
             .wFormatTag = WAVE_FORMAT_PCM,
@@ -322,7 +323,7 @@ pub fn fenster_audio_open(fa: *FensterAudio) FensterAudioError!void {
             _ = waveOutPrepareHeader(wo, &fa_win.hdr[i], @sizeOf(WAVEHDR));
             _ = waveOutWrite(wo, &fa_win.hdr[i], @sizeOf(WAVEHDR));
         }
-    } else if (std.target.os.tag == .linux) {
+    } else if (builtin.target.os.tag == .linux) {
         const fa_linux: *FensterAudioLinux = @ptrCast(@alignCast(fa));
         fa_linux.pos = 0;
         @memset(&fa_linux.buf, 0);
@@ -350,16 +351,16 @@ pub fn fenster_audio_open(fa: *FensterAudio) FensterAudioError!void {
 
 /// Close the audio device and release resources.
 pub fn fenster_audio_close(fa: *FensterAudio) void {
-    if (std.target.os.tag == .macos) {
+    if (builtin.target.os.tag == .macos) {
         const fa_mac: *FensterAudioMacos = @ptrCast(@alignCast(fa));
         _ = AudioQueueStop(fa_mac.queue, 0);
         _ = AudioQueueDispose(fa_mac.queue, 0);
         dispatch_release(fa_mac.drained);
         dispatch_release(fa_mac.full);
-    } else if (std.target.os.tag == .windows) {
+    } else if (builtin.target.os.tag == .windows) {
         const fa_win: *FensterAudioWindows = @ptrCast(@alignCast(fa));
         _ = waveOutClose(fa_win.wo);
-    } else if (std.target.os.tag == .linux) {
+    } else if (builtin.target.os.tag == .linux) {
         const fa_linux: *FensterAudioLinux = @ptrCast(@alignCast(fa));
         if (fa_linux.pcm) |pcm| {
             _ = snd_pcm_close(pcm);
@@ -369,12 +370,12 @@ pub fn fenster_audio_close(fa: *FensterAudio) void {
 
 /// Returns the number of samples that can be written without blocking.
 pub fn fenster_audio_available(fa: *const FensterAudio) usize {
-    if (std.target.os.tag == .macos) {
+    if (builtin.target.os.tag == .macos) {
         const fa_mac: *const FensterAudioMacos = @ptrCast(@alignCast(fa));
         const result = dispatch_semaphore_wait(fa_mac.drained, DISPATCH_TIME_NOW);
         if (result != 0) return 0;
         return buf_size - fa_mac.pos;
-    } else if (std.target.os.tag == .windows) {
+    } else if (builtin.target.os.tag == .windows) {
         const fa_win: *const FensterAudioWindows = @ptrCast(@alignCast(fa));
         var i: usize = 0;
         while (i < 2) : (i += 1) {
@@ -383,7 +384,7 @@ pub fn fenster_audio_available(fa: *const FensterAudio) usize {
             }
         }
         return 0;
-    } else if (std.target.os.tag == .linux) {
+    } else if (builtin.target.os.tag == .linux) {
         const fa_linux: *const FensterAudioLinux = @ptrCast(@alignCast(fa));
         const n = snd_pcm_avail(fa_linux.pcm orelse return 0);
         if (n < 0) {
@@ -399,7 +400,7 @@ pub fn fenster_audio_available(fa: *const FensterAudio) usize {
 /// Samples that do not fit in the available space are silently dropped,
 /// matching the original C header behavior.
 pub fn fenster_audio_write(fa: *FensterAudio, samples: []const f32) void {
-    if (std.target.os.tag == .macos) {
+    if (builtin.target.os.tag == .macos) {
         const fa_mac: *FensterAudioMacos = @ptrCast(@alignCast(fa));
         var remaining = samples.len;
         var idx: usize = 0;
@@ -413,7 +414,7 @@ pub fn fenster_audio_write(fa: *FensterAudio, samples: []const f32) void {
             fa_mac.pos = 0;
             dispatch_semaphore_signal(fa_mac.full);
         }
-    } else if (std.target.os.tag == .windows) {
+    } else if (builtin.target.os.tag == .windows) {
         const fa_win: *FensterAudioWindows = @ptrCast(@alignCast(fa));
         var i: usize = 0;
         while (i < 2) : (i += 1) {
@@ -427,7 +428,7 @@ pub fn fenster_audio_write(fa: *FensterAudio, samples: []const f32) void {
                 return;
             }
         }
-    } else if (std.target.os.tag == .linux) {
+    } else if (builtin.target.os.tag == .linux) {
         const fa_linux: *FensterAudioLinux = @ptrCast(@alignCast(fa));
         _ = snd_pcm_writei(fa_linux.pcm, samples.ptr, samples.len);
     }
@@ -451,7 +452,7 @@ test "fenster_audio: constants and struct sizes" {
     try std.testing.expect(@sizeOf(FensterAudio) > 0);
 
     // Platform-specific struct sizes are consistent.
-    if (std.target.os.tag == .linux) {
+    if (builtin.target.os.tag == .linux) {
         // Linux struct: pcm pointer + buf + pos.
         const expected: usize = @sizeOf(?*anyopaque) + buf_size * 4 + @sizeOf(usize);
         try std.testing.expectEqual(expected, @sizeOf(FensterAudioLinux));

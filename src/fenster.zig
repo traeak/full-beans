@@ -7,6 +7,7 @@
 const std = @import("std");
 const mem = std.mem;
 const c = std.c;
+const builtin = @import("builtin");
 
 pub const FensterError = error{
     DeviceOpen,
@@ -19,7 +20,7 @@ const HWND = ?*anyopaque;
 /// Window context.
 ///
 /// The `buf` pixel buffer is allocated and owned by the caller.
-pub const Fenster: type = if (std.target.os.tag == .macos)
+pub const Fenster: type = if (builtin.target.os.tag == .macos)
     extern struct {
         pub const Self = @This();
         title: [*:0]const u8,
@@ -33,7 +34,7 @@ pub const Fenster: type = if (std.target.os.tag == .macos)
         mouse: c_int,
         wnd: id,
     }
-else if (std.target.os.tag == .windows)
+else if (builtin.target.os.tag == .windows)
     extern struct {
         pub const Self = @This();
         title: [*:0]const u8,
@@ -47,7 +48,7 @@ else if (std.target.os.tag == .windows)
         mouse: c_int,
         hwnd: HWND,
     }
-else if (std.target.os.tag == .linux)
+else if (builtin.target.os.tag == .linux)
     extern struct {
         pub const Self = @This();
         title: [*:0]const u8,
@@ -65,7 +66,7 @@ else if (std.target.os.tag == .linux)
         img: ?*anyopaque,
     }
 else
-    @compileError("fenster: unsupported OS " ++ @tagName(std.target.os.tag));
+    @compileError("fenster: unsupported OS " ++ @tagName(builtin.target.os.tag));
 
 /// Return a pointer to the pixel at (x, y) for in-place mutation.
 pub fn pixel(self: *Fenster, x: usize, y: usize) *u32 {
@@ -78,7 +79,7 @@ pub fn pixel(self: *Fenster, x: usize, y: usize) *u32 {
 
 /// Sleep for the given number of milliseconds.
 pub fn fenster_sleep(io: std.Io, ms: i64) void {
-    std.Io.sleep(io, .{ .milliseconds = @intCast(ms) }, .real);
+    std.Io.sleep(io, .fromMilliseconds(ms), .real) catch {};
 }
 
 /// Current time in milliseconds since the Unix epoch.
@@ -128,7 +129,7 @@ const NSEventTypeLeftMouseDragged: NSUInteger = 6;
 const NSEventTypeKeyDown: NSUInteger = 10;
 const NSEventTypeKeyUp: NSUInteger = 11;
 
-extern "objc" fn objc_msgSend(receiver: id, selector: SEL, args: anytype) callconv(.C) id;
+extern "objc" fn objc_msgSend(receiver: id, selector: SEL, args: anytype) callconv(.c) id;
 extern "objc" fn objc_getClass(name: [*:0]const u8) Class;
 extern "objc" fn sel_getUid(name: [*:0]const u8) SEL;
 extern "objc" fn objc_allocateClassPair(class: Class, name: [*:0]const u8, reserved: c_ulong) Class;
@@ -167,7 +168,7 @@ fn msg_CGContextRef(receiver: id, selector: SEL) CGContextRef {
 }
 
 /// ObjC callback: drawRect: — render pixel buffer via CoreGraphics.
-fn fenster_draw_rect(view: id, sel: SEL, rect: CGRect) callconv(.C) c_int {
+fn fenster_draw_rect(view: id, sel: SEL, rect: CGRect) callconv(.c) c_int {
     _ = sel;
     _ = rect;
     const f: *Fenster = @ptrCast(@alignCast(
@@ -209,7 +210,7 @@ fn fenster_draw_rect(view: id, sel: SEL, rect: CGRect) callconv(.C) c_int {
 }
 
 /// ObjC callback: windowShouldClose: — terminate the app.
-fn fenster_should_close(delegate: id, sel: SEL, window: id) callconv(.C) BOOL {
+fn fenster_should_close(delegate: id, sel: SEL, window: id) callconv(.c) BOOL {
     _ = delegate;
     _ = sel;
     _ = window;
@@ -247,10 +248,14 @@ const FENSTER_KEYCODES_MACOS: [128]u8 = .{
 const HDC = ?*anyopaque;
 const HBITMAP = ?*anyopaque;
 const HINSTANCE = ?*anyopaque;
-const LPARAM = c_long;
-const WPARAM = c_ulong;
-const LRESULT = c_long;
-const LONG_PTR = c_long;
+// Windows uses the LLP64 data model: `long` stays 32-bit even on x86_64, while
+// pointer-sized types are 64-bit. Declaring these as c_long/c_ulong would truncate
+// every pointer passed through them, so use isize/usize, which track pointer width
+// correctly on both win32 and win64.
+const LPARAM = isize;
+const WPARAM = usize;
+const LRESULT = isize;
+const LONG_PTR = isize;
 
 const CS_VREDRAW: c_uint = 1;
 const CS_HREDRAW: c_uint = 2;
@@ -346,18 +351,34 @@ const BINFO = extern struct {
     bmiColors: [3]RGBQUAD,
 };
 
-extern "user32" fn GetModuleHandle(name: ?[*:0]const u8) HINSTANCE;
-extern "user32" fn RegisterClassEx(wndclass: *const WNDCLASSEX) c_ushort;
-extern "user32" fn CreateWindowEx(ex_style: c_ulong, class_name: [*:0]const u8, window_name: [*:0]const u8, style: c_ulong, x: c_int, y: c_int, width: c_int, height: c_int, parent: HWND, menu: ?*anyopaque, instance: HINSTANCE, param: ?*anyopaque) HWND;
-extern "user32" fn SetWindowLongPtr(hwnd: HWND, index: c_int, value: LONG_PTR) LONG_PTR;
+// Windows headers expose many entry points as A/W *macros* over the real ANSI and
+// wide exports -- the plain names are not symbols. This port passes
+// `[*:0]const u8` for class names and titles, so bind the ANSI variants and alias
+// them back to the plain names the call sites use. GetModuleHandle lives in
+// kernel32, not user32.
+extern "kernel32" fn GetModuleHandleA(name: ?[*:0]const u8) HINSTANCE;
+extern "user32" fn RegisterClassExA(wndclass: *const WNDCLASSEX) c_ushort;
+extern "user32" fn CreateWindowExA(ex_style: c_ulong, class_name: [*:0]const u8, window_name: [*:0]const u8, style: c_ulong, x: c_int, y: c_int, width: c_int, height: c_int, parent: HWND, menu: ?*anyopaque, instance: HINSTANCE, param: ?*anyopaque) HWND;
+extern "user32" fn SetWindowLongPtrA(hwnd: HWND, index: c_int, value: LONG_PTR) LONG_PTR;
+extern "user32" fn GetWindowLongPtrA(hwnd: HWND, index: c_int) LONG_PTR;
+extern "user32" fn PeekMessageA(msg: *MSG, hwnd: HWND, msg_filter_min: c_uint, msg_filter_max: c_uint, remove_msg: c_uint) c_int;
+extern "user32" fn DispatchMessageA(msg: *const MSG) LRESULT;
+extern "user32" fn DefWindowProcA(hwnd: HWND, msg: c_uint, wParam: WPARAM, lParam: LPARAM) LRESULT;
+
+const GetModuleHandle = GetModuleHandleA;
+const RegisterClassEx = RegisterClassExA;
+const CreateWindowEx = CreateWindowExA;
+const SetWindowLongPtr = SetWindowLongPtrA;
+const GetWindowLongPtr = GetWindowLongPtrA;
+const PeekMessage = PeekMessageA;
+const DispatchMessage = DispatchMessageA;
+const DefWindowProc = DefWindowProcA;
+
 extern "user32" fn ShowWindow(hwnd: HWND, cmd_show: c_int) c_int;
 extern "user32" fn UpdateWindow(hwnd: HWND) c_int;
-extern "user32" fn PeekMessage(msg: *MSG, hwnd: HWND, msg_filter_min: c_uint, msg_filter_max: c_uint, remove_msg: c_uint) c_int;
 extern "user32" fn TranslateMessage(msg: *const MSG) c_int;
-extern "user32" fn DispatchMessage(msg: *const MSG) LRESULT;
 extern "user32" fn InvalidateRect(hwnd: HWND, rect: ?*const anyopaque, erase: c_int) c_int;
 extern "user32" fn GetKeyState(virt_key: c_int) c_short;
-extern "user32" fn DefWindowProc(hwnd: HWND, msg: c_uint, wParam: WPARAM, lParam: LPARAM) LRESULT;
 extern "user32" fn DestroyWindow(hwnd: HWND) c_int;
 extern "user32" fn PostQuitMessage(exit_code: c_int) void;
 
@@ -372,20 +393,29 @@ extern "gdi32" fn DeleteObject(object: ?*anyopaque) c_int;
 extern "gdi32" fn DeleteDC(hdc: HDC) c_int;
 
 fn loWord(val: LPARAM) c_uint {
-    return @as(c_uint, @intCast(@as(u16, @truncate(@as(u32, @intCast(val))))));
+    const u: u64 = @bitCast(val);
+    return @intCast(u & 0xffff);
 }
 fn hiWord(val: LPARAM) c_uint {
-    return @as(c_uint, @intCast(@as(u16, @truncate(val >> 16))));
+    const u: u64 = @bitCast(val);
+    return @intCast((u >> 16) & 0xffff);
+}
+
+/// GetKeyState returns a signed SHORT; reinterpret as u16 so the 0x8000 key-down
+/// bit can be masked without overflowing the type.
+fn keyDown(vk: c_int) u16 {
+    return @as(u16, @bitCast(GetKeyState(vk))) & 0x8000;
 }
 
 // clang-format off
 const FENSTER_KEYCODES_WIN: [256]u8 = .{ 0, 27, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 45, 61, 8, 9, 81, 87, 69, 82, 84, 89, 85, 73, 79, 80, 91, 93, 10, 0, 65, 83, 68, 70, 71, 72, 74, 75, 76, 59, 39, 96, 0, 92, 90, 88, 67, 86, 66, 78, 77, 44, 46, 47, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 // clang-format on
 
-fn fenster_wndproc(hwnd: HWND, msg: c_uint, wParam: WPARAM, lParam: LPARAM) callconv(.C) LRESULT {
-    const f: *Fenster = @ptrCast(@alignCast(
-        @as(*Fenster, @ptrFromInt(SetWindowLongPtr(hwnd, GWLP_USERDATA))),
-    ));
+fn fenster_wndproc(hwnd: HWND, msg: c_uint, wParam: WPARAM, lParam: LPARAM) callconv(.c) LRESULT {
+    // Mirrors C: GetWindowLongPtr(hwnd, GWLP_USERDATA) recovers the Fenster
+    // pointer stashed in open(). (The port previously called SetWindowLongPtr
+    // with two arguments here.)
+    const f: *Fenster = @ptrFromInt(@as(usize, @bitCast(GetWindowLongPtr(hwnd, GWLP_USERDATA))));
     switch (msg) {
         WM_PAINT => {
             var ps: PAINTSTRUCT = undefined;
@@ -430,12 +460,14 @@ fn fenster_wndproc(hwnd: HWND, msg: c_uint, wParam: WPARAM, lParam: LPARAM) call
             f.x = @as(c_int, @intCast(loWord(lParam)));
         },
         WM_KEYDOWN, WM_KEYUP => {
-            f.mod = @as(c_int, @intCast(
-                ((GetKeyState(@intCast(VK_CONTROL)) & 0x8000) >> 15) |
-                    ((GetKeyState(@intCast(VK_SHIFT)) & 0x8000) >> 14) |
-                    ((GetKeyState(@intCast(VK_MENU)) & 0x8000) >> 13) |
-                    (((GetKeyState(@intCast(VK_LWIN)) | GetKeyState(@intCast(VK_RWIN))) & 0x8000) >> 12),
-            ));
+            // Bit layout matches C (and renderer.c's expectations):
+            //   bit0 ctrl, bit1 shift, bit2 alt, bit3 super
+            f.mod = @intCast(
+                @as(c_int, @intFromBool(keyDown(VK_CONTROL) != 0)) |
+                    (@as(c_int, @intFromBool(keyDown(VK_SHIFT) != 0)) << 1) |
+                    (@as(c_int, @intFromBool(keyDown(VK_MENU) != 0)) << 2) |
+                    (@as(c_int, @intFromBool(keyDown(VK_LWIN) != 0 or keyDown(VK_RWIN) != 0)) << 3),
+            );
             const scan_code = hiWord(lParam) & 0x1ff;
             const key = if (scan_code < 256) FENSTER_KEYCODES_WIN[scan_code] else 0;
             f.keys[key] = if (msg == WM_KEYDOWN) 1 else 0;
@@ -476,23 +508,54 @@ extern "X11" fn XOpenDisplay(name: ?[*:0]const u8) ?*anyopaque;
 extern "X11" fn XCreateSimpleWindow(dpy: ?*anyopaque, parent: c_ulong, x: c_int, y: c_int, width: c_uint, height: c_uint, border_width: c_uint, border_pixel: c_ulong, background_pixel: c_ulong) c_ulong;
 extern "X11" fn XCreateGC(dpy: ?*anyopaque, drawable: c_ulong, mask: c_ulong, values: ?*const anyopaque) ?*anyopaque;
 extern "X11" fn XSelectInput(dpy: ?*anyopaque, w: c_ulong, event_mask: c_ulong) c_int;
-extern "X11" fn XStoreName(dpy: ?*anyopaque, w: c_ulong, name: [*:0]const u8) void;
+extern "X11" fn XStoreName(dpy: ?*anyopaque, w: c_ulong, name: [*:0]const u8) c_int;
 extern "X11" fn XMapWindow(dpy: ?*anyopaque, w: c_ulong) c_int;
-extern "X11" fn XSync(dpy: ?*anyopaque, discard: c_int) void;
+extern "X11" fn XSync(dpy: ?*anyopaque, discard: c_int) c_int;
 extern "X11" fn XCreateImage(dpy: ?*anyopaque, visual: ?*anyopaque, depth: c_uint, format: c_int, offset: c_int, data: [*]u8, width: c_uint, height: c_uint, bitmap_pad: c_int, bytes_per_line: c_int) ?*anyopaque;
-extern "X11" fn XPutImage(dpy: ?*anyopaque, d: c_ulong, gc: ?*anyopaque, img: ?*anyopaque, src_x: c_int, src_y: c_int, dest_x: c_int, dest_y: c_int, width: c_uint, height: c_uint) void;
-extern "X11" fn XFlush(dpy: ?*anyopaque) void;
+extern "X11" fn XPutImage(dpy: ?*anyopaque, d: c_ulong, gc: ?*anyopaque, img: ?*anyopaque, src_x: c_int, src_y: c_int, dest_x: c_int, dest_y: c_int, width: c_uint, height: c_uint) c_int;
+extern "X11" fn XFlush(dpy: ?*anyopaque) c_int;
 extern "X11" fn XPending(dpy: ?*anyopaque) c_int;
-extern "X11" fn XNextEvent(dpy: ?*anyopaque, event: *XEvent) void;
+extern "X11" fn XNextEvent(dpy: ?*anyopaque, event: *XEvent) c_int;
 extern "X11" fn XFreeGC(dpy: ?*anyopaque, gc: ?*anyopaque) c_int;
-extern "X11" fn XDestroyImage(img: ?*anyopaque) void;
+extern "X11" fn XDestroyImage(img: ?*anyopaque) c_int;
 extern "X11" fn XCloseDisplay(dpy: ?*anyopaque) c_int;
-extern "X11" fn DefaultScreen(dpy: ?*anyopaque) c_int;
-extern "X11" fn RootWindow(dpy: ?*anyopaque, screen_number: c_int) c_ulong;
-extern "X11" fn DefaultVisual(dpy: ?*anyopaque, screen_number: c_int) ?*anyopaque;
-extern "X11" fn BlackPixel(dpy: ?*anyopaque, screen_number: c_int) c_ulong;
-extern "X11" fn WhitePixel(dpy: ?*anyopaque, screen_number: c_int) c_ulong;
+extern "X11" fn XScreenOfDisplay(dpy: ?*anyopaque, screen_number: c_int) *Screen;
+extern "X11" fn XDefaultScreenOfDisplay(dpy: ?*anyopaque) *Screen;
 extern "X11" fn XkbKeycodeToKeysym(dpy: ?*anyopaque, keycode: c_uint, index: c_int, group: c_int) KeySym;
+
+/// Screen (<X11/Xlib.h>), declared only through `black_pixel`.
+///
+/// `DefaultScreen`, `RootWindow`, `DefaultVisual`, `BlackPixel` and `WhitePixel`
+/// are C *macros* that expand to Display/Screen struct field loads -- they are not
+/// exported symbols, so they cannot be `extern`-declared. Use XScreenOfDisplay()
+/// / XDefaultScreenOfDisplay() (real functions) and read these fields instead.
+const Screen = extern struct {
+    ext_data: ?*anyopaque,
+    display: ?*anyopaque,
+    root: c_ulong,
+    width: c_int,
+    height: c_int,
+    mwidth: c_int,
+    mheight: c_int,
+    ndepths: c_int,
+    depths: ?*anyopaque,
+    root_depth: c_int,
+    root_visual: ?*anyopaque,
+    default_gc: ?*anyopaque,
+    cmap: c_ulong,
+    white_pixel: c_ulong,
+    black_pixel: c_ulong,
+};
+
+/// Leading fields of XImage (<X11/Xlib.h>), declared only as far as `data` so
+/// close() can clear it before XDestroyImage() would try to XFree() our buffer.
+const XImagePrefix = extern struct {
+    width: c_int,
+    height: c_int,
+    xoffset: c_int,
+    format: c_int,
+    data: ?[*]u8,
+};
 
 const XEvent = extern union {
     type: c_int,
@@ -633,7 +696,7 @@ const FENSTER_KEYCODES_LIN: [124]c_ulong = .{ XK_BackSpace, 8, XK_Delete, 127, X
 
 /// Open the window and initialize platform resources.
 pub fn open(self: *Fenster) FensterError!void {
-    if (std.target.os.tag == .macos) {
+    if (builtin.target.os.tag == .macos) {
         _ = msg_id(objc_getClass("NSApplication"), "sharedApplication");
         msg_void(NSApp, sel_getUid("setActivationPolicy:"), @as(NSInteger, 0));
 
@@ -677,10 +740,10 @@ pub fn open(self: *Fenster) FensterError!void {
         msg_void(self.wnd, sel_getUid("makeKeyAndOrderFront:"), null);
         msg_void(self.wnd, sel_getUid("center"));
         msg_void(NSApp, sel_getUid("activateIgnoringOtherApps:"), @as(BOOL, 1));
-    } else if (std.target.os.tag == .windows) {
+    } else if (builtin.target.os.tag == .windows) {
         const hInstance = GetModuleHandle(null);
-        var wc: WNDCLASSEX = undefined;
-        @memset(&wc, 0);
+        // Zig 0.16 @memset needs an indexable pointer; zero-init the whole struct.
+        var wc: WNDCLASSEX = std.mem.zeroes(WNDCLASSEX);
         wc.cbSize = @sizeOf(WNDCLASSEX);
         wc.style = CS_VREDRAW | CS_HREDRAW;
         wc.lpfnWndProc = &fenster_wndproc;
@@ -703,36 +766,39 @@ pub fn open(self: *Fenster) FensterError!void {
             null,
         );
         if (self.hwnd == null) return FensterError.DeviceOpen;
-        SetWindowLongPtr(self.hwnd, GWLP_USERDATA, @intFromPtr(self));
+        _ = SetWindowLongPtr(self.hwnd, GWLP_USERDATA, @intCast(@intFromPtr(self)));
         _ = ShowWindow(self.hwnd, SW_NORMAL);
         _ = UpdateWindow(self.hwnd);
-    } else if (std.target.os.tag == .linux) {
+    } else if (builtin.target.os.tag == .linux) {
         self.dpy = XOpenDisplay(null) orelse return FensterError.DeviceOpen;
-        const screen = DefaultScreen(self.dpy);
+        // The C original took the root window from the default screen but the
+        // visual from screen 0. Use the default screen for both; identical on any
+        // normal single-screen setup, and avoids a cross-screen visual mismatch.
+        const screen = XDefaultScreenOfDisplay(self.dpy);
         self.w = XCreateSimpleWindow(
             self.dpy,
-            RootWindow(self.dpy, screen),
+            screen.root,
             0,
             0,
             @intCast(self.width),
             @intCast(self.height),
             0,
-            BlackPixel(self.dpy, screen),
-            WhitePixel(self.dpy, screen),
+            screen.black_pixel,
+            screen.white_pixel,
         );
         self.gc = XCreateGC(self.dpy, self.w, 0, null);
-        XSelectInput(
+        _ = XSelectInput(
             self.dpy,
             self.w,
             ExposureMask | KeyPressMask | KeyReleaseMask |
                 ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
         );
-        XStoreName(self.dpy, self.w, self.title);
+        _ = XStoreName(self.dpy, self.w, self.title);
         _ = XMapWindow(self.dpy, self.w);
-        XSync(self.dpy, 0);
+        _ = XSync(self.dpy, 0);
         self.img = XCreateImage(
             self.dpy,
-            DefaultVisual(self.dpy, 0),
+            screen.root_visual,
             24,
             ZPixmap,
             0,
@@ -747,14 +813,19 @@ pub fn open(self: *Fenster) FensterError!void {
 
 /// Close the window and release platform resources.
 pub fn close(self: *Fenster) void {
-    if (std.target.os.tag == .macos) {
+    if (builtin.target.os.tag == .macos) {
         msg_void(self.wnd, sel_getUid("close"));
-    } else if (std.target.os.tag == .windows) {} else if (std.target.os.tag == .linux) {
+    } else if (builtin.target.os.tag == .windows) {} else if (builtin.target.os.tag == .linux) {
         _ = XFreeGC(self.dpy, self.gc);
-        const img_data: [*][*]u8 = @ptrCast(@alignCast(self.img));
-        img_data[1] = null;
-        XDestroyImage(self.img);
-        XCloseDisplay(self.dpy);
+        // XDestroyImage() calls XFree() on image->data. Our buffer is owned by
+        // the caller, so clear the pointer first. `data` sits at byte offset 16 of
+        // XImage (4 x int: width, height, xoffset, format) -- see
+        // <X11/Xlib.h>. Declared as a prefix struct rather than raw index math so
+        // the offset is explicit.
+        const img: *XImagePrefix = @ptrCast(@alignCast(self.img));
+        img.data = null;
+        _ = XDestroyImage(self.img);
+        _ = XCloseDisplay(self.dpy);
     }
 }
 
@@ -762,7 +833,7 @@ pub fn close(self: *Fenster) void {
 ///
 /// Returns `true` to continue, `false` if the window was closed (Windows only).
 pub fn loop(self: *Fenster) bool {
-    if (std.target.os.tag == .macos) {
+    if (builtin.target.os.tag == .macos) {
         msg_void(
             msg_id(self.wnd, sel_getUid("contentView")),
             "setNeedsDisplay:",
@@ -808,7 +879,7 @@ pub fn loop(self: *Fenster) bool {
 
         msg_void(NSApp, sel_getUid("sendEvent:"), ev);
         return true;
-    } else if (std.target.os.tag == .windows) {
+    } else if (builtin.target.os.tag == .windows) {
         var msg: MSG = undefined;
         while (PeekMessage(&msg, null, 0, 0, PM_REMOVE) != 0) {
             if (msg.message == WM_QUIT) return false;
@@ -817,13 +888,13 @@ pub fn loop(self: *Fenster) bool {
         }
         _ = InvalidateRect(self.hwnd, null, 1);
         return true;
-    } else if (std.target.os.tag == .linux) {
-        XPutImage(self.dpy, self.w, self.gc, self.img, 0, 0, 0, 0, @intCast(self.width), @intCast(self.height));
-        XFlush(self.dpy);
+    } else if (builtin.target.os.tag == .linux) {
+        _ = XPutImage(self.dpy, self.w, self.gc, self.img, 0, 0, 0, 0, @intCast(self.width), @intCast(self.height));
+        _ = XFlush(self.dpy);
 
-        while (XPending(self.dpy) > 0) {
+        while (0 < XPending(self.dpy)) {
             var ev: XEvent = undefined;
-            XNextEvent(self.dpy, &ev);
+            _ = XNextEvent(self.dpy, &ev);
             switch (ev.type) {
                 ButtonPress => self.mouse = 1,
                 ButtonRelease => self.mouse = 0,

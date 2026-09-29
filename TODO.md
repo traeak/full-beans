@@ -41,18 +41,18 @@ sliders, tree, popups, scrolling, live style editing), using the existing
 ## Tasks
 
 ### 0. Fenster smoke test (de-risk R1) — do this first
-- [ ] 0.1 Write `src/smoke_fenster.zig`: open an 800×600 `Fenster`, fill the
+- [x] 0.1 Write `src/smoke_fenster.zig`: open an 800×600 `Fenster`, fill the
       `[*]u32] buf` with a left-to-right RGB ramp using `pixel()`, run `loop()`
       for ~120 frames, exit when `loop()` returns false.
-- [ ] 0.2 Add a `zig build smoke` step that runs it.
-- [ ] 0.3 Run it on `DISPLAY=:0`. Confirm: window appears with title, ramp is
+- [x] 0.2 Add a `zig build smoke` step that runs it.
+- [x] 0.3 Run it on `DISPLAY=:0`. Confirm: window appears with title, ramp is
       visible, ESC/close quits cleanly, no crash, no X error.
-- [ ] 0.4 Confirm `keys[]`, `mod`, `x`, `y`, `mouse` fields actually get written
+- [x] 0.4 Confirm `keys[]`, `mod`, `x`, `y`, `mouse` fields actually get written
       by the Linux `loop()` — print one sample per input event and eyeball that
       mouse coords track the pointer and `mouse` flips on button press.
-- [ ] 0.5 Fix whatever Phase 0.3/0.4 breaks. **Do not proceed until the window
+- [x] 0.5 Fix whatever Phase 0.3/0.4 breaks. **Do not proceed until the window
       opens, paints, and reports input.**
-- [ ] 0.6 Record findings in `NOTES_fenster_smoke.md` (esp. any field whose
+- [x] 0.6 Record findings in `NOTES_fenster_smoke.md` (esp. any field whose
       semantics differ from `fenster.h`).
 
 ### 1. Atlas → binary assets (decision 4a)
@@ -203,6 +203,41 @@ sliders, tree, popups, scrolling, live style editing), using the existing
       0/111 checked despite the types being done — stale).
 
 ---
+
+## Discovered Tasks
+
+Surfaced during Phase 0, beyond the original plan. All completed.
+
+- [x] **D1** Fix `std.target` → `@import("builtin").target` in `fenster.zig`
+      (12 sites) and `fenster_audio.zig` (17 sites). `std.target` was removed in
+      Zig 0.16; `std.builtin` is NOT the same module as `@import("builtin")`.
+- [x] **D2** `Io.Duration` has no `.milliseconds` field → `.fromMilliseconds()`.
+- [x] **D3** Correct 6 Xlib extern return types (`void` → `c_int`) and add `_ =`.
+- [x] **D4** Replace the five Xlib *macro* pseudo-functions
+      (`DefaultScreen`/`RootWindow`/`DefaultVisual`/`BlackPixel`/`WhitePixel`)
+      with `XDefaultScreenOfDisplay` + a declared `Screen` extern struct.
+- [x] **D5** Fix `XImage.data` offset: was index 1 (`xoffset`), is index 2.
+      The old code left `data` pointing at our buffer, so `XDestroyImage()`
+      `XFree`d memory it did not own. Now a declared `XImagePrefix` struct.
+- [x] **D6** **Link libc.** Without it, Xlib's `calloc` hits an uninitialized
+      glibc heap and `XOpenDisplay` segfaults. Added
+      `mod.linkSystemLibrary("c", .{})`.
+- [x] **D7** `callconv(.C)` → `callconv(.c)` (4 sites, Windows branch).
+- [x] **D8** `@memset(&struct, 0)` → `std.mem.zeroes(T)` (WNDCLASSEX).
+- [x] **D9** `fenster_wndproc` used `SetWindowLongPtr` where C used
+      `GetWindowLongPtr`; declare and use the getter.
+- [x] **D10** LLP64: `LPARAM`/`WPARAM`/`LRESULT`/`LONG_PTR` were `c_long`
+      (32-bit on Win64) → `isize`/`usize`. Silent pointer truncation otherwise.
+- [x] **D11** Bind Windows A-suffixed exports
+      (`PeekMessageA`, `RegisterClassExA`, …) and alias to plain names;
+      `GetModuleHandleA` is kernel32, not user32.
+- [x] **D12** Make `smoke_fenster.zig` platform-gated so it compiles for
+      non-Linux targets (X11 self-injection is Linux-only).
+
+### Standing lesson for Phases 2–6
+`zig build` passing proves nothing about code the compiler never analyzed. Every
+phase must end with the new code actually **referenced from a built artifact**
+(and ideally run), not merely present in the tree.
 
 ## Notes
 - Style: TigerStyle — PascalCase types, camelCase functions, 2-space indent,

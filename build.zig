@@ -84,6 +84,10 @@ pub fn build(b: *std.Build) void {
     });
 
     // Link platform-specific libraries on the module where fenster/fenster_audio live.
+    // libc is required: libX11 (and the macOS/Windows system libs) allocate through
+    // the C allocator, and without linkLibC the glibc heap is never initialised by
+    // Zig's startup, so XOpenDisplay() segfaults inside calloc.
+    mod.linkSystemLibrary("c", .{});
     if (target.result.os.tag == .macos) {
         mod.linkFramework("AudioToolbox", .{});
         mod.linkFramework("dispatch", .{});
@@ -157,6 +161,23 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // Phase 0: standalone smoke test for the fenster port. Opens a real window,
+    // paints a ramp, and reports observed input-field changes. Imports the
+    // `full_beans` module so it inherits the platform library links above.
+    const smoke_exe = b.addExecutable(.{
+        .name = "smoke_fenster",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/smoke_fenster.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "full_beans", .module = mod }},
+        }),
+    });
+    const smoke_cmd = b.addRunArtifact(smoke_exe);
+    b.installArtifact(smoke_exe);
+    const smoke_step = b.step("smoke", "Run the fenster smoke test (opens a window)");
+    smoke_step.dependOn(&smoke_cmd.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
