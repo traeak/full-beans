@@ -103,6 +103,21 @@ pub fn build(b: *std.Build) void {
         mod.linkSystemLibrary("X11", .{});
     }
 
+    // Regenerate the atlas binary assets from atlas.inl before anything that
+    // @embedFile's them compiles. Cheap (~50 ms) and keeps a stale atlas.inl from
+    // silently shipping old glyphs. The generated assets/ files are also committed,
+    // so a plain checkout builds even without python3.
+    const atlas_gen = b.addSystemCommand(&.{
+        "python3",
+        b.pathFromRoot("tools/gen_atlas.py"),
+        "--in",
+        b.pathFromRoot("atlas.inl"),
+        "--outdir",
+        b.pathFromRoot("src/assets"),
+    });
+    const atlas_step = b.step("atlas", "Regenerate assets/*.bin from atlas.inl");
+    atlas_step.dependOn(&atlas_gen.step);
+
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
@@ -178,6 +193,12 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(smoke_exe);
     const smoke_step = b.step("smoke", "Run the fenster smoke test (opens a window)");
     smoke_step.dependOn(&smoke_cmd.step);
+
+    // atlas.inl -> assets/*.bin must land before any compile step that embeds them.
+    exe.step.dependOn(&atlas_gen.step);
+    smoke_exe.step.dependOn(&atlas_gen.step);
+    mod_tests.step.dependOn(&atlas_gen.step);
+    exe_tests.step.dependOn(&atlas_gen.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

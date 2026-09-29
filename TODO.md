@@ -56,22 +56,22 @@ sliders, tree, popups, scrolling, live style editing), using the existing
       semantics differ from `fenster.h`).
 
 ### 1. Atlas → binary assets (decision 4a)
-- [ ] 1.1 Write `tools/gen_atlas.py` that parses `atlas.inl` and emits
+- [x] 1.1 Write `tools/gen_atlas.py` that parses `atlas.inl` and emits
       `assets/atlas_texture.bin` = exactly 128×128 = 16384 bytes, row-major,
       from the `atlas_texture[]` initializer.
-- [ ] 1.2 Emit `assets/atlas_rects.bin` = packed little-endian `i32[4]` records
+- [x] 1.2 Emit `assets/atlas_rects.bin` = packed little-endian `i32[4]` records
       `{x, y, w, h}` in index order from the `static mu_Rect atlas[]`
       designated-initializer table, length = highest index + 1.
-- [ ] 1.3 Verify: `atlas_texture.bin` is 16384 bytes; `atlas_rects.bin` length
+- [x] 1.3 Verify: `atlas_texture.bin` is 16384 bytes; `atlas_rects.bin` length
       is a multiple of 16; spot-check `ATLAS_WHITE`, `ATLAS_FONT+32` (space),
       `ATLAS_FONT+65` ('A') against the `.inl` source by hand.
-- [ ] 1.4 Write `src/atlas.zig`: `@embedFile` both blobs; expose
+- [x] 1.4 Write `src/atlas.zig`: `@embedFile` both blobs; expose
       `texture: *const [16384]u8`, `rectAt(i: usize) Rect` (reads 16-byte
       record), `width = 128`, `height = 128`, `ATLAS_WHITE`, `ATLAS_FONT`,
       `fontRect(chr: u8) Rect`.
-- [ ] 1.5 Add comptime asserts: `@sizeOf(Rect) == 16`, blob sizes match
+- [x] 1.5 Add comptime asserts: `@sizeOf(Rect) == 16`, blob sizes match
       expectations, `ATLAS_FONT + 127` is within `atlas_rects.bin`.
-- [ ] 1.6 Wire `atlas` into `build.zig` install/step so `zig build` regenerates
+- [x] 1.6 Wire `atlas` into `build.zig` install/step so `zig build` regenerates
       assets when `atlas.inl` changes (or document the manual `make atlas` step).
 
 ### 2. microui core plumbing
@@ -234,10 +234,29 @@ Surfaced during Phase 0, beyond the original plan. All completed.
 - [x] **D12** Make `smoke_fenster.zig` platform-gated so it compiles for
       non-Linux targets (X11 self-injection is Linux-only).
 
+- [x] **D13** `@embedFile` cannot reference a path outside the module root. The
+      plan said `assets/`; that resolves above `src/` and fails with
+      `embed of file outside package path`. Assets now live in `src/assets/`.
+- [x] **D14** Zig does **not** run test blocks from imported files. Only the test
+      root's own. `zig build test` reported "3 tests passed" while all 6 atlas
+      tests silently never ran. Fixed with an explicit
+      `test { _ = @import("atlas.zig"); }` aggregator in `root.zig`.
+      **Every later phase must do the same or its tests are fiction.**
+- [x] **D15** `microui.zig` `Result` packed struct declared both fields
+      (`active`/`submit`/`change`) and same-named `pub const`s -- duplicate member
+      error. Never caught because nothing imported `microui.zig` until now.
+      Removed the inner consts (the top-level `RES_*` already exist).
+- [x] **D16** `@embedFile` returns `*const [N:0]u8`; annotate the target as a
+      `[]const u8` slice (or a fixed array), not `*const [0]u8`.
+
 ### Standing lesson for Phases 2–6
 `zig build` passing proves nothing about code the compiler never analyzed. Every
 phase must end with the new code actually **referenced from a built artifact**
 (and ideally run), not merely present in the tree.
+
+Phase 1 sharpened that twice: `zig build` was green while `atlas.zig` was never
+analyzed (D13 only appeared once a test referenced it), and `zig build test` was
+green while six atlas tests never executed (D14).
 
 ## Notes
 - Style: TigerStyle — PascalCase types, camelCase functions, 2-space indent,

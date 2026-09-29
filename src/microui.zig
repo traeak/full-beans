@@ -54,14 +54,14 @@ pub const IconId = enum(c_int) {
 };
 
 /// Result flags returned by controls.
+///
+/// Bit-compatible with C's `int` MU_RES_* mask (see the top-level RES_ACTIVE /
+/// RES_SUBMIT / RES_CHANGE constants), so widget return values can be bitcast
+/// without changing the wire layout.
 pub const Result = packed struct(c_int) {
     active: bool = false,
     submit: bool = false,
     change: bool = false,
-
-    pub const active: c_int = 1 << 0;
-    pub const submit: c_int = 1 << 1;
-    pub const change: c_int = 1 << 2;
 };
 
 /// Option flags passed to controls.

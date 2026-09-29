@@ -4,6 +4,8 @@ const Io = std.Io;
 
 pub const fenster_audio = @import("fenster_audio.zig");
 pub const fenster = @import("fenster.zig");
+pub const microui = @import("microui.zig");
+pub const atlas = @import("atlas.zig");
 
 /// This is a documentation comment to explain the `printAnotherMessage` function below.
 ///
@@ -18,4 +20,11 @@ pub fn add(a: i32, b: i32) i32 {
 
 test "basic add functionality" {
     try std.testing.expect(add(3, 7) == 10);
+}
+
+// Zig does not pull in test blocks from imported files automatically -- only the
+// test root's own. Reference each module here so `zig build test` actually runs
+// them. Without this, a module's tests silently never execute.
+test {
+    _ = @import("atlas.zig");
 }
