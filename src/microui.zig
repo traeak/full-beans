@@ -1410,6 +1410,601 @@ test "microui: checkbox toggles state on click" {
 }
 
 // ---------------------------------------------------------------------------
+// Numeric formatting
+//
+// C passes a printf format string at runtime. The demo only ever uses "%.3g"
+// (MU_REAL_FMT) and "%.0f" (uint8_slider), so those two plus "%d" are
+// implemented here rather than pulling in a full printf interpreter.
+// ---------------------------------------------------------------------------
+
+fn strLen(b: []const u8) usize {
+    return std.mem.indexOfScalar(u8, b, 0) orelse b.len;
+}
+
+fn clampReal(v: Real, lo: Real, hi: Real) Real {
+    return @min(@max(v, lo), hi);
+}
+
+/// Writes the formatted number into `buf`, NUL-terminates it, and returns the
+/// content slice. Supported: `%.<n>f`, `%.<n>g`, `%d`.
+pub fn formatReal(buf: []u8, fmt: []const u8, value: Real) []const u8 {
+    const kind = fmt[fmt.len - 1];
+    var prec: usize = 6;
+    if (2 < fmt.len and fmt[1] == '.') {
+        prec = 0;
+        var i: usize = 2;
+        while (i < fmt.len - 1) : (i += 1) {
+            prec = prec * 10 + (fmt[i] - '0');
+        }
+    }
+    const written: []const u8 = switch (kind) {
+        'f' => std.fmt.bufPrint(
+            buf,
+            "{d:1.[1]}",
+            .{ roundHalfEven(value, prec), prec },
+        ) catch buf[0..0],
+        'd' => std.fmt.bufPrint(buf, "{d}", .{@as(i64, @intFromFloat(@trunc(value)))}) catch buf[0..0],
+        'g' => formatG(buf, value, prec),
+        else => buf[0..0],
+    };
+    if (written.len < buf.len) buf[written.len] = 0;
+    return written;
+}
+
+fn formatG(buf: []u8, v: Real, prec_in: usize) []const u8 {
+    const prec = if (prec_in == 0) 1 else prec_in;
+    if (v == 0) return std.fmt.bufPrint(buf, "{d}", .{@as(i64, 0)}) catch buf[0..0];
+
+    const av = @abs(v);
+    var exp: i64 = @intFromFloat(@floor(@log10(av)));
+    // Guard against log10 imprecision nudging the exponent.
+    if (10.0 <= av / std.math.pow(f64, 10.0, @floatFromInt(exp))) exp += 1;
+
+    if (exp < -4 or @as(i64, @intCast(prec)) <= exp) {
+        // Scientific. NOTE: Zig renders the exponent as `e4` where C uses
+        // `e+04`. The demo's values stay in 0..255 so this path is never taken;
+        // flagged rather than silently approximated.
+        return std.fmt.bufPrint(buf, "{e:1.[1]}", .{ v, prec - 1 }) catch buf[0..0];
+    }
+    // `exp` is negative for |v| < 1, so do the arithmetic in i64 and only cast
+    // the (non-negative) result.
+    const need: i64 = @as(i64, @intCast(prec)) - 1 - exp;
+    const decimals: usize = if (0 < need) @intCast(need) else 0;
+    const out = std.fmt.bufPrint(
+        buf,
+        "{d:1.[1]}",
+        .{ roundHalfEven(v, decimals), decimals },
+    ) catch return buf[0..0];
+    return stripZeros(out);
+}
+
+/// C's printf rounds half **to even** ("12.5" -> "12", "13.5" -> "14"). Zig's
+/// `{d:.N}` rounds half away from zero, so pre-round here to stay byte-identical
+/// to the C demo's slider readouts.
+fn roundHalfEven(v: Real, decimals: usize) Real {
+    var scale: f64 = 1;
+    var i: usize = 0;
+    while (i < decimals) : (i += 1) scale *= 10;
+
+    const scaled = @as(f64, v) * scale;
+    const fl = @floor(scaled);
+    const frac = scaled - fl;
+    var r = fl;
+    if (0.5 < frac) {
+        r = fl + 1;
+    } else if (frac == 0.5) {
+        // Nudge to the nearest even integer.
+        if (@mod(@abs(fl), 2) != 0) r = fl + 1;
+    }
+    return @floatCast(r / scale);
+}
+
+fn stripZeros(in: []const u8) []const u8 {
+    var s = in;
+    if (std.mem.indexOfScalar(u8, s, '.') == null) return s;
+    while (0 < s.len and s[s.len - 1] == '0') s = s[0 .. s.len - 1];
+    if (0 < s.len and s[s.len - 1] == '.') s = s[0 .. s.len - 1];
+    return s;
+}
+
+fn parseReal(buf: []const u8) Real {
+    const s = buf[0..strLen(buf)];
+    if (s.len == 0) return 0;
+    return std.fmt.parseFloat(Real, s) catch 0;
+}
+
+// ---------------------------------------------------------------------------
+// Controls -- textbox
+// ---------------------------------------------------------------------------
+
+/// `buf` is the full fixed capacity; the string content is the prefix before the
+/// first NUL, exactly as in C.
+pub fn textboxRaw(ctx: *Context, buf: []u8, id: Id, r: Rect, opt: c_int) c_int {
+    var res: c_int = 0;
+    updateControl(ctx, id, r, opt | OPT_HOLDFOCUS);
+
+    if (ctx.focus == id) {
+        // Append whatever the platform delivered this frame.
+        var len = strLen(buf);
+        const n = @min(buf.len - len - 1, strLen(&ctx.input_text));
+        if (0 < n) {
+            @memcpy(buf[len..][0..n], ctx.input_text[0..n]);
+            len += n;
+            buf[len] = 0;
+            res |= RES_CHANGE;
+        }
+        // Backspace -- skip UTF-8 continuation bytes so a multi-byte character
+        // is removed whole rather than leaving a fragment.
+        if (ctx.key_pressed & KEY_BACKSPACE != 0 and 0 < len) {
+            while (true) {
+                len -= 1;
+                if (!(buf[len] & 0xc0 == 0x80 and 0 < len)) break;
+            }
+            buf[len] = 0;
+            res |= RES_CHANGE;
+        }
+        if (ctx.key_pressed & KEY_RETURN != 0) {
+            setFocus(ctx, 0);
+            res |= RES_SUBMIT;
+        }
+    }
+
+    const content = buf[0..strLen(buf)];
+    drawControlFrame(ctx, id, r, @intFromEnum(ColorId.base), opt);
+    if (ctx.focus == id) {
+        const color = ctx.style.colors[@intFromEnum(ColorId.text)];
+        const font = ctx.style.font;
+        const textw = ctx.text_width.?(font, content, -1);
+        const texth = ctx.text_height.?(font);
+        const ofx = r.w - ctx.style.padding - textw - 1;
+        const textx = r.x + @min(ofx, ctx.style.padding);
+        const texty = r.y + @divTrunc(r.h - texth, 2);
+        pushClipRect(ctx, r);
+        drawText(ctx, font, content, Vec2.vec2(textx, texty), color);
+        // caret
+        drawRect(ctx, Rect.rect(textx + textw, texty, 1, texth), color);
+        popClipRect(ctx);
+    } else {
+        drawControlText(ctx, content, r, @intFromEnum(ColorId.text), opt);
+    }
+    return res;
+}
+
+pub fn textboxEx(ctx: *Context, buf: []u8, opt: c_int) c_int {
+    // C: mu_get_id(ctx, &buf, sizeof(buf)) -- hashes the pointer value.
+    var ptr_tmp: [*]u8 = @ptrCast(buf);
+    const id = getId(ctx, std.mem.asBytes(&ptr_tmp));
+    const r = layoutNext(ctx);
+    return textboxRaw(ctx, buf, id, r, opt);
+}
+
+pub fn textbox(ctx: *Context, buf: []u8) c_int {
+    return textboxEx(ctx, buf, 0);
+}
+
+/// Shift+click on a slider/number swaps it for an editable text field.
+fn numberTextbox(ctx: *Context, value: *Real, r: Rect, id: Id) bool {
+    if (ctx.mouse_pressed == MOUSE_LEFT and ctx.key_down & KEY_SHIFT != 0 and ctx.hover == id) {
+        ctx.number_edit = id;
+        _ = formatReal(&ctx.number_edit_buf, REAL_FMT, value.*);
+    }
+    if (ctx.number_edit == id) {
+        const res = textboxRaw(ctx, &ctx.number_edit_buf, id, r, 0);
+        if (res & RES_SUBMIT != 0 or ctx.focus != id) {
+            value.* = parseReal(&ctx.number_edit_buf);
+            ctx.number_edit = 0;
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Controls -- slider / number
+// ---------------------------------------------------------------------------
+
+pub fn sliderEx(
+    ctx: *Context,
+    value: *Real,
+    low: Real,
+    high: Real,
+    step: Real,
+    fmt: []const u8,
+    opt: c_int,
+) c_int {
+    var res: c_int = 0;
+    const last = value.*;
+    var v = last;
+    var ptr_tmp: [*]Real = @ptrCast(value);
+    const id = getId(ctx, std.mem.asBytes(&ptr_tmp));
+    const base = layoutNext(ctx);
+
+    if (numberTextbox(ctx, &v, base, id)) return res;
+
+    updateControl(ctx, id, base, opt);
+
+    if (ctx.focus == id and (ctx.mouse_down | ctx.mouse_pressed) == MOUSE_LEFT) {
+        const fx: Real = @floatFromInt(ctx.mouse_pos.x - base.x);
+        const fw: Real = @floatFromInt(base.w);
+        v = low + fx * (high - low) / fw;
+        if (step != 0) {
+            // C: ((long long)((v + step/2) / step)) * step -- truncate to int.
+            const q: i64 = @intFromFloat(@trunc((v + step / 2) / step));
+            v = @as(Real, @floatFromInt(q)) * step;
+        }
+    }
+    value.* = clampReal(v, low, high);
+    v = value.*;
+    if (last != v) res |= RES_CHANGE;
+
+    drawControlFrame(ctx, id, base, @intFromEnum(ColorId.base), opt);
+
+    const w = ctx.style.thumb_size;
+    const ft: Real = @floatFromInt(base.w - w);
+    const x: c_int = @intFromFloat(@trunc((v - low) * ft / (high - low)));
+    const thumb = Rect.rect(base.x + x, base.y, w, base.h);
+    drawControlFrame(ctx, id, thumb, @intFromEnum(ColorId.button), opt);
+
+    var buf: [MAX_FMT + 1]u8 = undefined;
+    const s = formatReal(&buf, fmt, v);
+    drawControlText(ctx, s, base, @intFromEnum(ColorId.text), opt);
+    return res;
+}
+
+pub fn slider(ctx: *Context, value: *Real, low: Real, high: Real) c_int {
+    return sliderEx(ctx, value, low, high, 0, REAL_FMT, 0);
+}
+
+pub fn numberEx(ctx: *Context, value: *Real, step: Real, fmt: []const u8, opt: c_int) c_int {
+    var res: c_int = 0;
+    var ptr_tmp: [*]Real = @ptrCast(value);
+    const id = getId(ctx, std.mem.asBytes(&ptr_tmp));
+    const base = layoutNext(ctx);
+    const last = value.*;
+
+    if (numberTextbox(ctx, value, base, id)) return res;
+
+    updateControl(ctx, id, base, opt);
+
+    if (ctx.focus == id and ctx.mouse_down == MOUSE_LEFT) {
+        value.* += @as(Real, @floatFromInt(ctx.mouse_delta.x)) * step;
+    }
+    if (last != value.*) res |= RES_CHANGE;
+
+    drawControlFrame(ctx, id, base, @intFromEnum(ColorId.base), opt);
+    var buf: [MAX_FMT + 1]u8 = undefined;
+    const s = formatReal(&buf, fmt, value.*);
+    drawControlText(ctx, s, base, @intFromEnum(ColorId.text), opt);
+    return res;
+}
+
+pub fn number(ctx: *Context, value: *Real, step: Real) c_int {
+    return numberEx(ctx, value, step, REAL_FMT, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Controls -- header / tree node
+// ---------------------------------------------------------------------------
+
+fn headerInternal(ctx: *Context, label_: []const u8, istreenode: bool, opt: c_int) c_int {
+    const id = getId(ctx, label_);
+    const idx = poolGet(ctx, &ctx.treenode_pool, id);
+    layoutRow(ctx, 1, &[_]c_int{-1}, 0);
+
+    const active0 = 0 <= idx;
+    const expanded = if (opt & OPT_EXPANDED != 0) !active0 else active0;
+    const r = layoutNext(ctx);
+    updateControl(ctx, id, r, 0);
+
+    // Toggle on click.
+    const active = active0 != (ctx.mouse_pressed == MOUSE_LEFT and ctx.focus == id);
+
+    if (0 <= idx) {
+        if (active) {
+            poolUpdate(ctx, &ctx.treenode_pool, @intCast(idx));
+        } else {
+            ctx.treenode_pool[@intCast(idx)] = std.mem.zeroes(PoolItem);
+        }
+    } else if (active) {
+        _ = poolInit(ctx, &ctx.treenode_pool, id);
+    }
+
+    if (istreenode) {
+        if (ctx.hover == id) ctx.draw_frame.?(ctx, r, @intFromEnum(ColorId.button_hover));
+    } else {
+        drawControlFrame(ctx, id, r, @intFromEnum(ColorId.button), 0);
+    }
+    drawIcon(
+        ctx,
+        if (expanded) @intFromEnum(IconId.expanded) else @intFromEnum(IconId.collapsed),
+        Rect.rect(r.x, r.y, r.h, r.h),
+        ctx.style.colors[@intFromEnum(ColorId.text)],
+    );
+    var tr = r;
+    tr.x += tr.h - ctx.style.padding;
+    tr.w -= tr.h - ctx.style.padding;
+    drawControlText(ctx, label_, tr, @intFromEnum(ColorId.text), 0);
+    return if (expanded) RES_ACTIVE else 0;
+}
+
+pub fn headerEx(ctx: *Context, label_: []const u8, opt: c_int) c_int {
+    return headerInternal(ctx, label_, false, opt);
+}
+
+pub fn header(ctx: *Context, label_: []const u8) c_int {
+    return headerEx(ctx, label_, 0);
+}
+
+pub fn beginTreenodeEx(ctx: *Context, label_: []const u8, opt: c_int) c_int {
+    const res = headerInternal(ctx, label_, true, opt);
+    if (res & RES_ACTIVE != 0) {
+        getLayout(ctx).indent += ctx.style.indent;
+        // Pushes the already-computed id -- does NOT re-hash.
+        ctx.id_stack.push(ctx.last_id);
+    }
+    return res;
+}
+
+pub fn beginTreenode(ctx: *Context, label_: []const u8) c_int {
+    return beginTreenodeEx(ctx, label_, 0);
+}
+
+pub fn endTreenode(ctx: *Context) void {
+    getLayout(ctx).indent -= ctx.style.indent;
+    popId(ctx);
+}
+
+// ---------------------------------------------------------------------------
+// Containers
+// ---------------------------------------------------------------------------
+
+/// One scrollbar. C implements this as a macro instantiated twice with the
+/// `x|y` `w|h` references swapped; the same trick is done here with comptime
+/// field names so there is still only one copy of the logic.
+fn scrollbar(
+    ctx: *Context,
+    cnt: *Container,
+    b: *Rect,
+    cs: Vec2,
+    comptime p: []const u8,
+    comptime q: []const u8,
+    comptime sp: []const u8,
+    comptime sq: []const u8,
+) void {
+    const maxscroll = @field(cs, q) - @field(b.*, sq);
+    if (0 < maxscroll and 0 < @field(b.*, sq)) {
+        const id = getId(ctx, "!scrollbar" ++ p);
+        var base = b.*;
+        @field(base, p) = @field(b.*, p) + @field(b.*, sp);
+        @field(base, sp) = ctx.style.scrollbar_size;
+
+        updateControl(ctx, id, base, 0);
+        if (ctx.focus == id and ctx.mouse_down == MOUSE_LEFT) {
+            @field(cnt.scroll, q) += @divTrunc(
+                @field(ctx.mouse_delta, q) * @field(cs, q),
+                @field(base, sq),
+            );
+        }
+        @field(cnt.scroll, q) = @min(@max(@field(cnt.scroll, q), 0), maxscroll);
+
+        ctx.draw_frame.?(ctx, base, @intFromEnum(ColorId.scroll_base));
+        var thumb = base;
+        @field(thumb, sq) = @max(
+            ctx.style.thumb_size,
+            @divTrunc(@field(base, sq) * @field(b.*, sq), @field(cs, q)),
+        );
+        @field(thumb, q) += @divTrunc(
+            @field(cnt.scroll, q) * (@field(base, sq) - @field(thumb, sq)),
+            maxscroll,
+        );
+        ctx.draw_frame.?(ctx, thumb, @intFromEnum(ColorId.scroll_thumb));
+
+        if (mouseOver(ctx, b.*)) ctx.scroll_target = cnt;
+    } else {
+        @field(cnt.scroll, q) = 0;
+    }
+}
+
+fn scrollbars(ctx: *Context, cnt: *Container, body: *Rect) void {
+    const sz = ctx.style.scrollbar_size;
+    var cs = cnt.content_size;
+    cs.x += ctx.style.padding * 2;
+    cs.y += ctx.style.padding * 2;
+    pushClipRect(ctx, body.*);
+    // Shrink the body to make room for the scrollbars.
+    if (cs.y > cnt.body.h) body.w -= sz;
+    if (cs.x > cnt.body.w) body.h -= sz;
+    scrollbar(ctx, cnt, body, cs, "x", "y", "w", "h");
+    scrollbar(ctx, cnt, body, cs, "y", "x", "h", "w");
+    popClipRect(ctx);
+}
+
+fn pushContainerBody(ctx: *Context, cnt: *Container, body: Rect, opt: c_int) void {
+    var b = body;
+    if (opt & OPT_NOSCROLL == 0) scrollbars(ctx, cnt, &b);
+    pushLayout(ctx, expandRect(b, -ctx.style.padding), cnt.scroll);
+    cnt.body = b;
+}
+
+fn beginRootContainer(ctx: *Context, cnt: *Container) void {
+    ctx.container_stack.push(cnt);
+    ctx.root_list.push(cnt);
+    cnt.head = @ptrCast(pushJump(ctx, null) catch return);
+    // Hover root if we overlap and outrank the current candidate.
+    if (rectOverlapsVec2(cnt.rect, ctx.mouse_pos) and
+        (ctx.next_hover_root == null or ctx.next_hover_root.?.*.zindex < cnt.zindex))
+    {
+        ctx.next_hover_root = cnt;
+    }
+    // Reset clipping: a root container nested inside another root container must
+    // not be clipped to the outer one.
+    ctx.clip_stack.push(unclipped_rect);
+}
+
+fn endRootContainer(ctx: *Context) void {
+    const cnt = getCurrentContainer(ctx);
+    cnt.tail = @ptrCast(pushJump(ctx, null) catch return);
+    const head: *JumpCommand = @ptrCast(@alignCast(cnt.head.?));
+    head.dst = @ptrCast(arena(ctx) + ctx.command_list.idx);
+    popClipRect(ctx);
+    popContainer(ctx);
+}
+
+pub fn beginWindowEx(ctx: *Context, title: []const u8, rect: Rect, opt: c_int) c_int {
+    const id = getId(ctx, title);
+    const cnt = getContainer(ctx, id, opt) orelse return 0;
+    if (cnt.open == 0) return 0;
+    ctx.id_stack.push(id);
+
+    if (cnt.rect.w == 0) cnt.rect = rect;
+    beginRootContainer(ctx, cnt);
+    const r = cnt.rect;
+    var body = cnt.rect;
+
+    if (opt & OPT_NOFRAME == 0) ctx.draw_frame.?(ctx, r, @intFromEnum(ColorId.window_bg));
+
+    if (opt & OPT_NOTITLE == 0) {
+        var tr = r;
+        tr.h = ctx.style.title_height;
+        ctx.draw_frame.?(ctx, tr, @intFromEnum(ColorId.title_bg));
+
+        // title bar drag
+        const tid = getId(ctx, "!title");
+        updateControl(ctx, tid, tr, opt);
+        drawControlText(ctx, title, tr, @intFromEnum(ColorId.title_text), opt);
+        if (tid == ctx.focus and ctx.mouse_down == MOUSE_LEFT) {
+            cnt.rect.x += ctx.mouse_delta.x;
+            cnt.rect.y += ctx.mouse_delta.y;
+        }
+        body.y += tr.h;
+        body.h -= tr.h;
+
+        // close button
+        if (opt & OPT_NOCLOSE == 0) {
+            const cid = getId(ctx, "!close");
+            const cr = Rect.rect(tr.x + tr.w - tr.h, tr.y, tr.h, tr.h);
+            tr.w -= cr.w;
+            drawIcon(ctx, @intFromEnum(IconId.close), cr, ctx.style.colors[@intFromEnum(ColorId.title_text)]);
+            updateControl(ctx, cid, cr, opt);
+            if (ctx.mouse_pressed == MOUSE_LEFT and cid == ctx.focus) cnt.open = 0;
+        }
+    }
+
+    pushContainerBody(ctx, cnt, body, opt);
+
+    // resize handle
+    if (opt & OPT_NORESIZE == 0) {
+        const sz = ctx.style.title_height;
+        const rid = getId(ctx, "!resize");
+        const rr = Rect.rect(r.x + r.w - sz, r.y + r.h - sz, sz, sz);
+        updateControl(ctx, rid, rr, opt);
+        if (rid == ctx.focus and ctx.mouse_down == MOUSE_LEFT) {
+            cnt.rect.w = @max(96, cnt.rect.w + ctx.mouse_delta.x);
+            cnt.rect.h = @max(64, cnt.rect.h + ctx.mouse_delta.y);
+        }
+    }
+
+    if (opt & OPT_AUTOSIZE != 0) {
+        const lb = getLayout(ctx).body;
+        cnt.rect.w = cnt.content_size.x + (cnt.rect.w - lb.w);
+        cnt.rect.h = cnt.content_size.y + (cnt.rect.h - lb.h);
+    }
+
+    // A popup closes when the click lands outside it.
+    if (opt & OPT_POPUP != 0 and ctx.mouse_pressed != 0 and ctx.hover_root != cnt) {
+        cnt.open = 0;
+    }
+
+    pushClipRect(ctx, cnt.body);
+    return RES_ACTIVE;
+}
+
+pub fn beginWindow(ctx: *Context, title: []const u8, rect: Rect) c_int {
+    return beginWindowEx(ctx, title, rect, 0);
+}
+
+pub fn endWindow(ctx: *Context) void {
+    popClipRect(ctx);
+    endRootContainer(ctx);
+}
+
+pub fn openPopup(ctx: *Context, name: []const u8) void {
+    const cnt = getContainerByName(ctx, name) orelse return;
+    // Claim the hover root so begin_window_ex does not immediately close it.
+    ctx.hover_root = cnt;
+    ctx.next_hover_root = cnt;
+    cnt.rect = Rect.rect(ctx.mouse_pos.x, ctx.mouse_pos.y, 1, 1);
+    cnt.open = 1;
+    bringToFront(ctx, cnt);
+}
+
+pub fn beginPopup(ctx: *Context, name: []const u8) c_int {
+    const opt = OPT_POPUP | OPT_AUTOSIZE | OPT_NORESIZE | OPT_NOSCROLL | OPT_NOTITLE | OPT_CLOSED;
+    return beginWindowEx(ctx, name, Rect.rect(0, 0, 0, 0), opt);
+}
+
+pub fn endPopup(ctx: *Context) void {
+    endWindow(ctx);
+}
+
+pub fn beginPanelEx(ctx: *Context, name: []const u8, opt: c_int) void {
+    pushId(ctx, name);
+    const cnt = getContainer(ctx, ctx.last_id, opt) orelse return;
+    cnt.rect = layoutNext(ctx);
+    if (opt & OPT_NOFRAME == 0) {
+        ctx.draw_frame.?(ctx, cnt.rect, @intFromEnum(ColorId.panel_bg));
+    }
+    ctx.container_stack.push(cnt);
+    pushContainerBody(ctx, cnt, cnt.rect, opt);
+    pushClipRect(ctx, cnt.body);
+}
+
+pub fn beginPanel(ctx: *Context, name: []const u8) void {
+    beginPanelEx(ctx, name, 0);
+}
+
+pub fn endPanel(ctx: *Context) void {
+    popClipRect(ctx);
+    popContainer(ctx);
+}
+
+// Expected strings taken from C `snprintf` on the same values (see /tmp/c_fmt.c).
+test "microui: formatReal matches C snprintf" {
+    const Case = struct { v: Real, g: []const u8, f: []const u8 };
+    const cases = [_]Case{
+        .{ .v = 0, .g = "0", .f = "0" },
+        .{ .v = 1, .g = "1", .f = "1" },
+        .{ .v = 2, .g = "2", .f = "2" },
+        .{ .v = 10, .g = "10", .f = "10" },
+        .{ .v = 12.5, .g = "12.5", .f = "12" },
+        .{ .v = 99.99, .g = "100", .f = "100" },
+        .{ .v = 100, .g = "100", .f = "100" },
+        .{ .v = 128, .g = "128", .f = "128" },
+        .{ .v = 255, .g = "255", .f = "255" },
+        .{ .v = 0.5, .g = "0.5", .f = "0" },
+        .{ .v = 0.05, .g = "0.05", .f = "0" },
+        .{ .v = 0.005, .g = "0.005", .f = "0" },
+        .{ .v = 3.14159, .g = "3.14", .f = "3" },
+        .{ .v = 0.0001, .g = "0.0001", .f = "0" },
+        .{ .v = -7.25, .g = "-7.25", .f = "-7" },
+        .{ .v = 255.999, .g = "256", .f = "256" },
+        .{ .v = 1.005, .g = "1", .f = "1" },
+    };
+    var buf: [64]u8 = undefined;
+    for (cases) |c| {
+        testing.expectEqualStrings(c.g, formatReal(&buf, "%.3g", c.v)) catch |e| {
+            std.debug.print("\n%.3g of {d}: want '{s}' got '{s}'\n", .{ c.v, c.g, formatReal(&buf, "%.3g", c.v) });
+            return e;
+        };
+        testing.expectEqualStrings(c.f, formatReal(&buf, "%.0f", c.v)) catch |e| {
+            std.debug.print("\n%.0f of {d}: want '{s}' got '{s}'\n", .{ c.v, c.f, formatReal(&buf, "%.0f", c.v) });
+            return e;
+        };
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Comptime assertions
 // ---------------------------------------------------------------------------
 

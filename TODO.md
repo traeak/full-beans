@@ -125,18 +125,18 @@ sliders, tree, popups, scrolling, live style editing), using the existing
       would have missed the real bug.
 
 ### 5. microui interactive widgets + containers
-- [ ] 5.1 Port `textboxRaw` (cursor, selection-free editing, RETURN/BACKSPACE
+- [x] 5.1 Port `textboxRaw` (cursor, selection-free editing, RETURN/BACKSPACE
       handling, focus). Biggest single function in the file (~73 lines).
-- [ ] 5.2 Port `textboxEx` / `textbox`.
-- [ ] 5.3 Port `sliderEx` + `slider`.
-- [ ] 5.4 Port `numberEx` + `number` (uses `number_edit_buf`, `REAL_FMT` /
+- [x] 5.2 Port `textboxEx` / `textbox`.
+- [x] 5.3 Port `sliderEx` + `slider`.
+- [x] 5.4 Port `numberEx` + `number` (uses `number_edit_buf`, `REAL_FMT` /
       `SLIDER_FMT` formatting).
-- [ ] 5.5 Port `headerEx` / `beginTreenodeEx` / `endTreenode`.
-- [ ] 5.6 Port `beginWindowEx` / `beginWindow` / `endWindow` (drag, resize,
+- [x] 5.5 Port `headerEx` / `beginTreenodeEx` / `endTreenode`.
+- [x] 5.6 Port `beginWindowEx` / `beginWindow` / `endWindow` (drag, resize,
       close, scroll, content_size).
-- [ ] 5.7 Port `openPopup` / `beginPopup` / `endPopup`.
-- [ ] 5.8 Port `beginPanelEx` / `beginPanel` / `endPanel`.
-- [ ] 5.9 Re-export `microui` from `src/root.zig`.
+- [x] 5.7 Port `openPopup` / `beginPopup` / `endPopup`.
+- [x] 5.8 Port `beginPanelEx` / `beginPanel` / `endPanel`.
+- [x] 5.9 Re-export `microui` from `src/root.zig`.
 
 ### 6. Renderer (`src/renderer.zig`, decision 3b)
 - [ ] 6.1 Define `Renderer` struct: owns `*Fenster`, `tex_buf`/`src_buf`/
@@ -287,6 +287,25 @@ Surfaced during Phase 0, beyond the original plan. All completed.
       `std.mem.asBytes(&ptr)`. This is why `checkbox` keeps a local copy of the
       pointer before hashing — hashing the `*bool` directly through a slice
       would give the same bytes, but the local makes the intent explicit.
+
+- [x] **D26** C's `printf` rounds half **to even** (`12.5 -> "12"`), Zig's
+      `{d:.N}` rounds half **away from zero** (`12.5 -> "13"`). Caught by the
+      format sweep. `roundHalfEven` now pre-rounds in both the `%f` and `%g`
+      paths. This shows up directly in the Style Editor's `%.0f` sliders.
+- [x] **D27** Zig 0.16 runtime precision is `{d:1.[1]}` with `.{value, prec}`.
+      Cost several attempts: `{d:.3}` is a *literal* precision, and `[name]`
+      resolves against the argument tuple.
+- [x] **D28** `%g` scientific path diverges cosmetically: Zig emits `1.23e4`,
+      C emits `1.23e+04`. Unreachable for the demo (values stay 0..255), so
+      left as a noted gap rather than hand-rolling an exponent formatter.
+- [x] **D29** The C `scrollbar(...)` macro is instantiated twice with `x|y`
+      `w|h` swapped. Ported as one function taking comptime field-name params
+      (`@field(rec, p)`), preserving the single-copy structure. The guard is on
+      the `sq` extent, which is also the divisor in every `@divTrunc` below it,
+      so no division by zero is reachable.
+- [x] **D30** `mu_get_id(ctx, "!scrollbar" #y, 11)` stringifies the macro arg:
+      the ids are `"!scrollbary"` / `"!scrollbarx"` (11 bytes, no NUL counted).
+      Reproduced with `"!scrollbar" ++ p`.
 
 ### Standing lesson for Phases 2–6
 `zig build` passing proves nothing about code the compiler never analyzed. Every
