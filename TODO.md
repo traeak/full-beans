@@ -114,13 +114,15 @@ sliders, tree, popups, scrolling, live style editing), using the existing
       by running the C binary with a trace, or hand-compute).
 
 ### 4. microui simple widgets
-- [ ] 4.1 Port `drawControlFrame` / `drawControlText` / `mouseOver` /
+- [x] 4.1 Port `drawControlFrame` / `drawControlText` / `mouseOver` /
       `updateControl`.
-- [ ] 4.2 Port `text` and `label`.
-- [ ] 4.3 Port `buttonEx` + `button` wrapper.
-- [ ] 4.4 Port `checkbox`.
-- [ ] 4.5 Manual check in a scratch app: button highlights on hover, fires on
-      click, checkbox toggles.
+- [x] 4.2 Port `text` and `label`.
+- [x] 4.3 Port `buttonEx` + `button` wrapper.
+- [x] 4.4 Port `checkbox`.
+- [x] 4.5 Verified by **automated** tests instead of a scratch app: hover sets
+      `ctx.hover`, click yields `RES_SUBMIT`, off-button click yields nothing,
+      checkbox toggles and toggles back. See 4.22 below for why the manual route
+      would have missed the real bug.
 
 ### 5. microui interactive widgets + containers
 - [ ] 5.1 Port `textboxRaw` (cursor, selection-free editing, RETURN/BACKSPACE
@@ -266,6 +268,25 @@ Surfaced during Phase 0, beyond the original plan. All completed.
 - [x] **D21** Test expectations are generated from the **C implementation**
       (`/tmp/c_trace.c` compiled against `microui.c`), not hand-written, so the
       port is checked against authoritative values rather than against itself.
+
+- [x] **D22** `mu_text` word wrap: my first transliteration dropped C's inner
+      do-while exit condition (`} while (*end && *end != '\n');`) and left
+      `while (true)` with only the width break. It walked off the end of the
+      string — caught as `index out of bounds: index 66, len 65`. Validated by
+      compiling `/tmp/c_wrap.c` against the real `microui.c`, walking the
+      command arena, and diffing the drawn runs for 4 cases (long sentence,
+      embedded newlines, single long word, short). All match.
+- [x] **D23** C's `/` on signed ints truncates toward zero; Zig requires an
+      explicit `@divTrunc`. Two sites in `drawControlText` (vertical centering
+      and `OPT_ALIGNCENTER`). Silent in C, a compile error in Zig — good.
+- [x] **D24** `Container.head`/`tail` are typed `?*Command` in the port rather
+      than C's `?*JumpCommand`. Functionally identical (the union's `jump`
+      member is what `end()` reads) and avoids a cast at every assignment.
+- [x] **D25** Pointer-keyed ids: C's `mu_get_id(ctx, &state, sizeof(state))`
+      hashes the **pointer value**, not the pointee. Reproduced with
+      `std.mem.asBytes(&ptr)`. This is why `checkbox` keeps a local copy of the
+      pointer before hashing — hashing the `*bool` directly through a slice
+      would give the same bytes, but the local makes the intent explicit.
 
 ### Standing lesson for Phases 2–6
 `zig build` passing proves nothing about code the compiler never analyzed. Every

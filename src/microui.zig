@@ -435,7 +435,8 @@ fn drawFrame(ctx: *Context, rect: Rect, colorid: c_int) void {
     drawRect(ctx, rect, ctx.style.colors[@intCast(colorid)]);
     if (colorid == @intFromEnum(ColorId.scroll_base) or
         colorid == @intFromEnum(ColorId.scroll_thumb) or
-        colorid == @intFromEnum(ColorId.title_bg)) {
+        colorid == @intFromEnum(ColorId.title_bg))
+    {
         return;
     }
     if (ctx.style.colors[@intFromEnum(ColorId.border)].a != 0) {
@@ -721,11 +722,13 @@ pub fn getClipRect(ctx: *Context) Rect {
 pub fn checkClip(ctx: *Context, r: Rect) Clip {
     const cr = getClipRect(ctx);
     if (cr.x + cr.w < r.x or r.x + r.w < cr.x or
-        cr.y + cr.h < r.y or r.y + r.h < cr.y) {
+        cr.y + cr.h < r.y or r.y + r.h < cr.y)
+    {
         return .all;
     }
     if (r.x >= cr.x and r.x + r.w <= cr.x + cr.w and
-        r.y >= cr.y and r.y + r.h <= cr.y + cr.h) {
+        r.y >= cr.y and r.y + r.h <= cr.y + cr.h)
+    {
         return .none;
     }
     return .part;
@@ -749,8 +752,7 @@ fn pushLayout(ctx: *Context, body: Rect, scroll: Vec2) void {
     layout.body = Rect.rect(body.x - scroll.x, body.y - scroll.y, body.w, body.h);
     layout.max = Vec2.vec2(-0x1000000, -0x1000000);
     ctx.layout_stack.push(layout);
-    var width: c_int = 0;
-    layoutRow(ctx, 1, @as([*]const c_int, @ptrCast(&width)), 0);
+    layoutRow(ctx, 1, &[_]c_int{0}, 0);
 }
 
 fn popContainer(ctx: *Context) void {
@@ -946,12 +948,12 @@ pub fn inputKeyup(ctx: *Context, key: c_int) void {
     ctx.key_down &= ~key;
 }
 
-pub fn inputText(ctx: *Context, text: []const u8) void {
+pub fn inputText(ctx: *Context, str: []const u8) void {
     const len = std.mem.indexOfScalar(u8, &ctx.input_text, 0) orelse ctx.input_text.len;
-    const size = text.len + 1;
+    const size = str.len + 1;
     std.debug.assert(len + size <= ctx.input_text.len);
-    @memcpy(ctx.input_text[len..][0..size], text);
-    ctx.input_text[len + text.len] = 0;
+    @memcpy(ctx.input_text[len..][0..size], str);
+    ctx.input_text[len + str.len] = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,6 +1092,321 @@ test "microui: pool is LRU by frame" {
     try testing.expectEqual(@as(isize, 0), poolGet(&ctx, &items, 111));
     try testing.expectEqual(@as(isize, 1), poolGet(&ctx, &items, 222));
     try testing.expectEqual(@as(isize, -1), poolGet(&ctx, &items, 333));
+}
+
+// ---------------------------------------------------------------------------
+// Controls -- shared state machine
+// ---------------------------------------------------------------------------
+
+fn inHoverRoot(ctx: *Context) bool {
+    var i = ctx.container_stack.idx;
+    while (0 < i) {
+        i -= 1;
+        const c = ctx.container_stack.items[i].?;
+        if (c == ctx.hover_root) return true;
+        // Only root containers have their `head` field set; stop searching once we
+        // reach the current root container.
+        if (c.head != null) break;
+    }
+    return false;
+}
+
+pub fn drawControlFrame(ctx: *Context, id: Id, rect: Rect, colorid: c_int, opt: c_int) void {
+    if (opt & OPT_NOFRAME != 0) return;
+    // focus shifts the color id by 2, hover by 1 (BUTTON -> BUTTONHOVER ->
+    // BUTTONFOCUS, BASE -> BASEHOVER -> BASEFOCUS).
+    const delta: c_int = if (ctx.focus == id) 2 else if (ctx.hover == id) 1 else 0;
+    ctx.draw_frame.?(ctx, rect, colorid + delta);
+}
+
+pub fn drawControlText(ctx: *Context, str: []const u8, rect: Rect, colorid: c_int, opt: c_int) void {
+    const font = ctx.style.font;
+    const tw = ctx.text_width.?(font, str, -1);
+    pushClipRect(ctx, rect);
+    var pos = Vec2.vec2(0, rect.y + @divTrunc(rect.h - ctx.text_height.?(font), 2));
+    if (opt & OPT_ALIGNCENTER != 0) {
+        pos.x = rect.x + @divTrunc(rect.w - tw, 2);
+    } else if (opt & OPT_ALIGNRIGHT != 0) {
+        pos.x = rect.x + rect.w - tw - ctx.style.padding;
+    } else {
+        pos.x = rect.x + ctx.style.padding;
+    }
+    drawText(ctx, font, str, pos, ctx.style.colors[@intCast(colorid)]);
+    popClipRect(ctx);
+}
+
+pub fn mouseOver(ctx: *Context, rect: Rect) bool {
+    return rectOverlapsVec2(rect, ctx.mouse_pos) and
+        rectOverlapsVec2(getClipRect(ctx), ctx.mouse_pos) and
+        inHoverRoot(ctx);
+}
+
+/// Hover / focus bookkeeping shared by every interactive control.
+pub fn updateControl(ctx: *Context, id: Id, rect: Rect, opt: c_int) void {
+    const over = mouseOver(ctx, rect);
+
+    if (ctx.focus == id) ctx.updated_focus = 1;
+    if (opt & OPT_NOINTERACT != 0) return;
+    if (over and ctx.mouse_down == 0) ctx.hover = id;
+
+    if (ctx.focus == id) {
+        if (ctx.mouse_pressed != 0 and !over) setFocus(ctx, 0);
+        if (ctx.mouse_down == 0 and (opt & OPT_HOLDFOCUS) == 0) setFocus(ctx, 0);
+    }
+
+    if (ctx.hover == id) {
+        if (ctx.mouse_pressed != 0) {
+            setFocus(ctx, id);
+        } else if (!over) {
+            ctx.hover = 0;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Controls -- text, label, button, checkbox
+// ---------------------------------------------------------------------------
+
+/// Byte at `i`, or 0 past the end. Mirrors C's NUL-terminated `*p` reads so the
+/// word-wrap loop below can be a faithful transliteration.
+fn at(s: []const u8, i: usize) u8 {
+    return if (i < s.len) s[i] else 0;
+}
+
+/// Word-wrapped text.
+pub fn text(ctx: *Context, str: []const u8) void {
+    const wdt: c_int = -1;
+    const font = ctx.style.font;
+    const color = ctx.style.colors[@intFromEnum(ColorId.text)];
+    var p: usize = 0;
+    var wrap_end: usize = 0;
+
+    layoutBeginColumn(ctx);
+    layoutRow(ctx, 1, &[_]c_int{wdt}, ctx.text_height.?(font));
+
+    while (true) {
+        const r = layoutNext(ctx);
+        var w: c_int = 0;
+        const start = p;
+        wrap_end = p;
+
+        while (true) {
+            const word = p;
+            while (at(str, p) != 0 and str[p] != ' ' and str[p] != '\n') p += 1;
+            w += ctx.text_width.?(font, str[word..p], @intCast(p - word));
+            if (r.w < w and wrap_end != start) break;
+            // C measures the delimiter byte itself with len 1.
+            const delim = if (p < str.len) str[p .. p + 1] else "\x00";
+            w += ctx.text_width.?(font, delim, 1);
+            wrap_end = p;
+            p += 1;
+            // C: `} while (*end && *end != '\n');` -- stop the line at the
+            // terminator or an explicit newline.
+            if (at(str, wrap_end) == 0 or at(str, wrap_end) == '\n') break;
+        }
+
+        drawText(ctx, font, str[start..wrap_end], Vec2.vec2(r.x, r.y), color);
+        p = wrap_end + 1;
+        if (at(str, wrap_end) == 0) break;
+    }
+
+    layoutEndColumn(ctx);
+}
+
+pub fn label(ctx: *Context, str: []const u8) void {
+    drawControlText(ctx, str, layoutNext(ctx), @intFromEnum(ColorId.text), 0);
+}
+
+/// Returns a Result bitmask (RES_SUBMIT when clicked).
+pub fn buttonEx(ctx: *Context, label_: ?[]const u8, icon: c_int, opt: c_int) c_int {
+    var res: c_int = 0;
+    const id = if (label_) |l| getId(ctx, l) else blk: {
+        // C hashes the icon int's storage: mu_get_id(ctx, &icon, sizeof(icon)).
+        var tmp = icon;
+        break :blk getId(ctx, std.mem.asBytes(&tmp));
+    };
+    const r = layoutNext(ctx);
+    updateControl(ctx, id, r, opt);
+
+    if (ctx.mouse_pressed == MOUSE_LEFT and ctx.focus == id) res |= RES_SUBMIT;
+
+    drawControlFrame(ctx, id, r, @intFromEnum(ColorId.button), opt);
+    if (label_) |l| drawControlText(ctx, l, r, @intFromEnum(ColorId.text), opt);
+    if (icon != 0) drawIcon(ctx, icon, r, ctx.style.colors[@intFromEnum(ColorId.text)]);
+    return res;
+}
+
+pub fn button(ctx: *Context, label_: []const u8) c_int {
+    return buttonEx(ctx, label_, 0, 0);
+}
+
+/// Returns a Result bitmask (RES_CHANGE when toggled).
+pub fn checkbox(ctx: *Context, label_: []const u8, state: *bool) c_int {
+    var res: c_int = 0;
+    // C hashes the pointer value itself: mu_get_id(ctx, &state, sizeof(state)).
+    var ptr_tmp = state;
+    const id = getId(ctx, std.mem.asBytes(&ptr_tmp));
+    const r = layoutNext(ctx);
+    const box = Rect.rect(r.x, r.y, r.h, r.h);
+    updateControl(ctx, id, r, 0);
+
+    if (ctx.mouse_pressed == MOUSE_LEFT and ctx.focus == id) {
+        res |= RES_CHANGE;
+        state.* = !state.*;
+    }
+
+    drawControlFrame(ctx, id, box, @intFromEnum(ColorId.base), 0);
+    if (state.*) {
+        drawIcon(ctx, @intFromEnum(IconId.check), box, ctx.style.colors[@intFromEnum(ColorId.text)]);
+    }
+    const tr = Rect.rect(r.x + box.w, r.y, r.w - box.w, r.h);
+    drawControlText(ctx, label_, tr, @intFromEnum(ColorId.text), 0);
+    return res;
+}
+
+/// Collects the drawn text runs from the command arena, exactly as the renderer
+/// would consume them. Returns the count; fills `out` in draw order.
+fn collectTextRuns(ctx: *Context, out: *[64][]const u8) usize {
+    var n: usize = 0;
+    var c: ?*Command = null;
+    while (nextCommand(ctx, &c)) {
+        const cmd = c.?;
+        if (cmd.*.type == .text) {
+            const sp: [*]const u8 = @ptrCast(&cmd.*.text.str);
+            const len = std.mem.indexOfScalar(u8, sp[0..4096], 0) orelse 4096;
+            out[n] = sp[0..len];
+            n += 1;
+        }
+    }
+    return n;
+}
+
+fn wrapRuns(str: []const u8, out: *[64][]const u8) usize {
+    var ctx = testContext();
+    begin(&ctx);
+    ctx.command_list.idx = 0;
+    var l: Layout = std.mem.zeroes(Layout);
+    l.body = Rect.rect(0, 0, 100, 1000);
+    l.max = Vec2.vec2(-0x1000000, -0x1000000);
+    ctx.layout_stack.idx = 0;
+    ctx.layout_stack.push(l);
+    text(&ctx, str);
+    return collectTextRuns(&ctx, out);
+}
+
+test "microui: mu_text word wrap matches C" {
+    const cases = [_]struct { in: []const u8, want: []const []const u8 }{
+        .{
+            .in = "The quick brown fox jumps over the lazy dog and keeps running far",
+            .want = &.{ "The quick", "brown fox", "jumps over", "the lazy", "dog and", "keeps", "running far" },
+        },
+        .{ .in = "one two\nthree four five\nsix", .want = &.{ "one two", "three four", "five", "six" } },
+        .{ .in = "exactlyoneword", .want = &.{"exactlyoneword"} },
+        .{ .in = "a b c", .want = &.{"a b c"} },
+    };
+    for (cases) |c| {
+        var buf: [64][]const u8 = undefined;
+        const n = wrapRuns(c.in, &buf);
+        const got = buf[0..n];
+        testing.expectEqual(c.want.len, got.len) catch |e| {
+            std.debug.print("\nfor '{s}': got {any}\n", .{ c.in, got });
+            return e;
+        };
+        for (c.want, got) |w, g| {
+            testing.expectEqualStrings(w, g) catch |e| {
+                std.debug.print("\nfor '{s}': want '{s}' got '{s}'\n", .{ c.in, w, g });
+                return e;
+            };
+        }
+    }
+}
+
+/// A minimal root container + layout so `inHoverRoot()` and `layoutNext()` work
+/// without the full window code (Phase 5).
+const Fixture = struct {
+    ctx: Context,
+    jump: JumpCommand,
+    cnt: Container,
+
+    fn init(hover_x: c_int, hover_y: c_int) Fixture {
+        var f = Fixture{
+            .ctx = testContext(),
+            .jump = .{
+                .base = .{ .type = .jump, .size = @sizeOf(JumpCommand) },
+                .dst = null,
+            },
+            .cnt = std.mem.zeroes(Container),
+        };
+        // A root container is identified by having `head` set (see inHoverRoot).
+        f.cnt.head = @ptrCast(&f.jump);
+        f.cnt.tail = @ptrCast(&f.jump);
+        f.ctx.mouse_pos = Vec2.vec2(hover_x, hover_y);
+        return f;
+    }
+
+    fn frame(self: *Fixture) void {
+        begin(&self.ctx);
+        self.ctx.hover_root = &self.cnt;
+        self.ctx.container_stack.idx = 0;
+        self.ctx.container_stack.push(&self.cnt);
+        var l: Layout = std.mem.zeroes(Layout);
+        l.body = Rect.rect(0, 0, 400, 300);
+        l.max = Vec2.vec2(-0x1000000, -0x1000000);
+        self.ctx.layout_stack.idx = 0;
+        self.ctx.layout_stack.push(l);
+        const widths = [_]c_int{100};
+        layoutRow(&self.ctx, 1, &widths, 20);
+    }
+};
+
+test "microui: button hover then click yields RES_SUBMIT" {
+    var f = Fixture.init(50, 10);
+
+    // Frame 1: pointer is over the button, no button held -> hover is set.
+    f.frame();
+    var res = buttonEx(&f.ctx, "Click", 0, 0);
+    try testing.expectEqual(@as(c_int, 0), res);
+    try testing.expectEqual(f.ctx.last_id, f.ctx.hover);
+    const hovered = f.ctx.hover;
+
+    // Frame 2: left button goes down while still hovering -> focus + submit.
+    f.frame();
+    inputMousedown(&f.ctx, 50, 10, MOUSE_LEFT);
+    res = buttonEx(&f.ctx, "Click", 0, 0);
+    try testing.expectEqual(RES_SUBMIT, res & RES_SUBMIT);
+    try testing.expectEqual(hovered, f.ctx.focus);
+}
+
+test "microui: button outside the pointer never submits" {
+    var f = Fixture.init(350, 250); // far from the 100x20 button at the origin
+    f.frame();
+    try testing.expectEqual(@as(c_int, 0), buttonEx(&f.ctx, "Click", 0, 0));
+    f.frame();
+    inputMousedown(&f.ctx, 350, 250, MOUSE_LEFT);
+    try testing.expectEqual(@as(c_int, 0), buttonEx(&f.ctx, "Click", 0, 0) & RES_SUBMIT);
+}
+
+test "microui: checkbox toggles state on click" {
+    var f = Fixture.init(50, 10);
+    var state = false;
+
+    f.frame();
+    try testing.expectEqual(@as(c_int, 0), checkbox(&f.ctx, "Flag", &state));
+    try testing.expectEqual(false, state);
+
+    f.frame();
+    inputMousedown(&f.ctx, 50, 10, MOUSE_LEFT);
+    const res = checkbox(&f.ctx, "Flag", &state);
+    try testing.expectEqual(RES_CHANGE, res & RES_CHANGE);
+    try testing.expectEqual(true, state);
+
+    // And back again.
+    f.frame();
+    inputMouseup(&f.ctx, 50, 10, MOUSE_LEFT);
+    f.frame();
+    inputMousedown(&f.ctx, 50, 10, MOUSE_LEFT);
+    _ = checkbox(&f.ctx, "Flag", &state);
+    try testing.expectEqual(false, state);
 }
 
 // ---------------------------------------------------------------------------
