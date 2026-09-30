@@ -195,13 +195,13 @@ sliders, tree, popups, scrolling, live style editing), using the existing
       overflow, no stack overflow on the id/clip stacks.
 
 ### 9. Cross-platform compile gates
-- [ ] 9.1 `zig build` for native Linux — clean.
-- [ ] 9.2 `zig build -Dtarget=x86_64-windows-gnu` — clean.
-- [ ] 9.3 `zig build -Dtarget=aarch64-macos` (or x86_64-macos) — clean, if the
+- [x] 9.1 `zig build` for native Linux — clean.
+- [x] 9.2 `zig build -Dtarget=x86_64-windows-gnu` — clean.
+- [x] 9.3 `zig build -Dtarget=aarch64-macos` (or x86_64-macos) — clean, if the
       toolchain/SDK is available here. If not, record it as unverified rather
       than silently skipped.
-- [ ] 9.4 `zig build test` — all tests pass.
-- [ ] 9.5 Update `TODO_microui.md` checkboxes to reflect reality (currently
+- [x] 9.4 `zig build test` — all tests pass.
+- [x] 9.5 Update `TODO_microui.md` checkboxes to reflect reality (currently
       0/111 checked despite the types being done — stale).
 
 ---
@@ -362,6 +362,13 @@ Surfaced during Phase 0, beyond the original plan. All completed.
       renderer pointer and segfaulted two frames later at `flush(self=0x0)` —
       a crash site unrelated to its cause. Fixed and pinned with a size-assertion
       test. Full write-up in `NOTES_perf.md`.
+
+- [x] **D41 macOS cannot LINK from a Linux host** (no macOS SDK, so Cocoa /
+      CoreGraphics / objc are unresolvable). Recorded as environment-limited, not
+      silently skipped: added `zig build verify-targets`, which `addObject`
+      compile-checks aarch64-macos + x86_64-macos (plus windows-gnu,
+      aarch64-linux-gnu, riscv64-linux-gnu) with no linking. macOS **runtime**
+      parity remains unverified and needs a real Mac.
 
 ### Standing lesson for Phases 2–6
 `zig build` passing proves nothing about code the compiler never analyzed. Every

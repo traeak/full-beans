@@ -1,4 +1,4 @@
-//! Port of main.c -- the three-window microui demo.
+//! The three-window microui demo.
 
 const std = @import("std");
 const Io = std.Io;

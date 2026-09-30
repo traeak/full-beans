@@ -103,20 +103,9 @@ pub fn build(b: *std.Build) void {
         mod.linkSystemLibrary("X11", .{});
     }
 
-    // Regenerate the atlas binary assets from atlas.inl before anything that
-    // @embedFile's them compiles. Cheap (~50 ms) and keeps a stale atlas.inl from
-    // silently shipping old glyphs. The generated assets/ files are also committed,
-    // so a plain checkout builds even without python3.
-    const atlas_gen = b.addSystemCommand(&.{
-        "python3",
-        b.pathFromRoot("tools/gen_atlas.py"),
-        "--in",
-        b.pathFromRoot("atlas.inl"),
-        "--outdir",
-        b.pathFromRoot("src/assets"),
-    });
-    const atlas_step = b.step("atlas", "Regenerate assets/*.bin from atlas.inl");
-    atlas_step.dependOn(&atlas_gen.step);
+    // Atlas binary assets (src/assets/*.bin) are committed and @embedFile'd by
+    // src/atlas.zig. No regeneration step needed — the C source (atlas.inl) has
+    // been eliminated as part of the full Zig port.
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -194,11 +183,38 @@ pub fn build(b: *std.Build) void {
     const smoke_step = b.step("smoke", "Run the fenster smoke test (opens a window)");
     smoke_step.dependOn(&smoke_cmd.step);
 
-    // atlas.inl -> assets/*.bin must land before any compile step that embeds them.
-    exe.step.dependOn(&atlas_gen.step);
-    smoke_exe.step.dependOn(&atlas_gen.step);
-    mod_tests.step.dependOn(&atlas_gen.step);
-    exe_tests.step.dependOn(&atlas_gen.step);
+    // No atlas generation dependency — binaries are committed.
+
+    // Cross-linking macOS frameworks needs the macOS SDK, which only exists on a
+    // Mac, so `zig build -Dtarget=*-macos` fails at LINK from here. That is an
+    // environment limit, not a source defect. This step compile-checks both macOS
+    // arches with `addObject` (no link), so the port itself stays gated, and also
+    // re-checks the targets we can fully link.
+    const verify_step = b.step(
+        "verify-targets",
+        "Compile-check every supported target (macOS is link-free: no SDK off-Mac)",
+    );
+    const verify_targets = [_][]const u8{
+        "aarch64-macos",
+        "x86_64-macos",
+        "x86_64-windows-gnu",
+        "aarch64-linux-gnu",
+        "riscv64-linux-gnu",
+    };
+    inline for (verify_targets) |t| {
+        const vt = b.resolveTargetQuery(std.Target.Query.parse(.{ .arch_os_abi = t }) catch {
+            @panic("bad target query in build.zig");
+        });
+        const vmod = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = vt,
+            .optimize = .ReleaseSafe,
+        });
+        // Deliberately NOT linking frameworks/system libs here: we want the
+        // type-check without needing a foreign SDK.
+        const obj = b.addObject(.{ .name = "verify_" ++ t, .root_module = vmod });
+        verify_step.dependOn(&obj.step);
+    }
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

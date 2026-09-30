@@ -967,7 +967,7 @@ pub fn inputText(ctx: *Context, str: []const u8) void {
 }
 
 // ---------------------------------------------------------------------------
-// Tests -- expectations generated from the C implementation (microui.c) so the
+// Tests -- expectations generated from the original C implementation so the
 // port is checked against authoritative values, not against itself.
 // ---------------------------------------------------------------------------
 
@@ -1986,7 +1986,7 @@ pub fn endPanel(ctx: *Context) void {
     popContainer(ctx);
 }
 
-// Expected strings taken from C `snprintf` on the same values (see /tmp/c_fmt.c).
+// Expected strings taken from C `snprintf` on the same values.
 test "microui: formatReal matches C snprintf" {
     const Case = struct { v: Real, g: []const u8, f: []const u8 };
     const cases = [_]Case{

@@ -1,9 +1,9 @@
-//! Software renderer for microui command streams (port of renderer.c).
+//! Software renderer for microui command streams.
 //!
 //! Decision 3b: the renderer is a struct that borrows a `*Fenster` and owns its
-//! own staging arrays. C kept all of this in file-scope globals, which is why
-//! `r_key_down` could mutate `window.keys` in place -- here that state is
-//! explicit and per-instance.
+//! own staging arrays. The original C version kept all of this in file-scope
+//! globals, so a draw callback could reach into the window and mutate it in
+//! place -- here that state is explicit and per-instance.
 
 const std = @import("std");
 const fenster = @import("fenster.zig");
@@ -117,7 +117,7 @@ pub const Renderer = struct {
                     const row = @as(usize, @intCast(y)) * width;
                     var x = xstart;
                     while (x < xend) : (x += 1) {
-                        // C's texture_color() takes the renderer-relative offset
+                        // The textured path works in renderer-relative offsets
                         // and adds the atlas rect's origin itself; `atlas.sample`
                         // expects absolute atlas coordinates, so the origin has
                         // to be applied here.

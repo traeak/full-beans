@@ -460,7 +460,7 @@ fn fenster_wndproc(hwnd: HWND, msg: c_uint, wParam: WPARAM, lParam: LPARAM) call
             f.x = @as(c_int, @intCast(loWord(lParam)));
         },
         WM_KEYDOWN, WM_KEYUP => {
-            // Bit layout matches C (and renderer.c's expectations):
+            // Bit layout matches the renderer's expectations:
             //   bit0 ctrl, bit1 shift, bit2 alt, bit3 super
             f.mod = @intCast(
                 @as(c_int, @intFromBool(keyDown(VK_CONTROL) != 0)) |
@@ -963,7 +963,6 @@ test "fenster: construct and tear down without a display" {
         @intFromPtr(pixel(&f, 2, 3)) - @intFromPtr(f.buf),
     );
 }
-
 
 // Guards D40: the X11 event structs must match <X11/Xlib.h> byte-for-byte.
 // An undersized XEvent makes XNextEvent() overflow the caller's stack.

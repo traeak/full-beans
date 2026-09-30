@@ -260,7 +260,7 @@ pub fn main(init: std.process.Init) !void {
             try w.print("f{d}  loop() returned false (quit signal)\n", .{i});
             break;
         }
-        // ESC quits early, mirroring main.c.
+        // ESC quits early.
         if (f.keys[27] != 0) {
             try w.print("f{d}  ESC pressed -- quitting early\n", .{i});
             break;

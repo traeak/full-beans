@@ -7,7 +7,7 @@
 //!   src/assets/atlas_rects.bin    N * 16 bytes, little-endian int32 {x, y, w, h}
 //!
 //! The texture is a single-channel image; the renderer samples it and multiplies
-//! the value into the draw color (see `renderer.c`'s `greyscale` / `texture_color`).
+//! the value into the draw color.
 
 const std = @import("std");
 const microui = @import("microui.zig");
@@ -22,7 +22,7 @@ pub const ATLAS_WHITE: usize = 5;
 /// First font glyph index. `fontRect(chr)` resolves to `ATLAS_FONT + chr`.
 pub const ATLAS_FONT: usize = 6;
 
-/// Icon indices, mirroring MU_ICON_* from microui.h.
+/// Icon indices, mirroring the `IconId` values in `microui.zig`.
 pub const ICON_NONE: usize = 0;
 pub const ICON_CLOSE: usize = 1;
 pub const ICON_CHECK: usize = 2;
@@ -56,7 +56,7 @@ pub fn rectAt(index: usize) Rect {
 
 /// Source rectangle for a printable ASCII glyph.
 ///
-/// `renderer.c` clamps the character to 127 and skips UTF-8 continuation bytes
+/// The renderer clamps the character to 127 and skips UTF-8 continuation bytes
 /// before reaching the table, so callers must apply the same filtering.
 pub fn fontRect(chr: u8) Rect {
     return rectAt(ATLAS_FONT + @as(usize, chr));
